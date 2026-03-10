@@ -1,0 +1,4 @@
+openai>=1.50.0
+openai-agents>=0.0.12
+python-dotenv>=1.0.1
+eval_type_backport>=0.3.1
