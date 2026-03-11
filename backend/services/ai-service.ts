@@ -2,9 +2,13 @@ import OpenAI from 'openai';
 import { v4 as uuidv4 } from 'uuid';
 import { processOpenSCADCode } from './code-processor';
 
+const DEEPSEEK_API_KEY = process.env.QINIU_DEEPSEEK_API_KEY || process.env.QN_API_KEY;
+const DEEPSEEK_BASE_URL = process.env.QINIU_DEEPSEEK_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
+const DEEPSEEK_MODEL = process.env.QINIU_DEEPSEEK_MODEL || process.env.OPENSCAD_MODEL || 'deepseek-r1';
+
 const openai = new OpenAI({
-  apiKey: process.env.QN_API_KEY,
-  baseURL: process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1',
+  apiKey: DEEPSEEK_API_KEY,
+  baseURL: DEEPSEEK_BASE_URL,
   dangerouslyAllowBrowser: false,
 });
 
@@ -17,8 +21,8 @@ interface GenerateResult {
 
 export async function generateOpenSCAD(prompt: string, sessionId?: string): Promise<GenerateResult> {
   try {
-    if (!process.env.QN_API_KEY) {
-      throw new Error('未配置 QN_API_KEY，无法调用 AI 生成服务');
+    if (!DEEPSEEK_API_KEY) {
+      throw new Error('未配置七牛 DeepSeek API Key（QINIU_DEEPSEEK_API_KEY 或 QN_API_KEY）');
     }
 
     // 通过 system prompt 约束模型输出为可执行的参数化 OpenSCAD 代码。
@@ -41,7 +45,7 @@ cube([length, width, height]);`;
 
     const response = await Promise.race([
       openai.chat.completions.create({
-        model: process.env.OPENSCAD_MODEL || 'deepseek-r1',
+        model: DEEPSEEK_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: prompt }
@@ -50,7 +54,7 @@ cube([length, width, height]);`;
         temperature: 0.7,
       }),
       new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('AI 生成超时，请稍后重试')), 15000);
+        setTimeout(() => reject(new Error('AI 生成超时')), 15000);
       })
     ]);
 
@@ -71,7 +75,7 @@ cube([length, width, height]);`;
       sessionId: sessionId || uuidv4()
     };
   } catch (error) {
-    console.error('OpenAI API错误:', error);
+    console.error('DeepSeek API 调用失败:', error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

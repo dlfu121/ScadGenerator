@@ -40,6 +40,7 @@ export type AppAction =
   | { type: 'SET_COMPILE_MESSAGE'; payload: string }
   | { type: 'SET_COMPILE_ERROR_DETAIL'; payload?: string }
   | { type: 'SET_ERROR'; payload?: string }
+  | { type: 'CLEAR_COMPILE_ERROR' }
   | { type: 'ADD_TO_HISTORY'; payload: HistoryItem }
   | { type: 'CLEAR_HISTORY' }
   | { type: 'RESET_STATE' };
@@ -96,6 +97,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
     
     case 'SET_ERROR':
       return { ...state, error: action.payload };
+    
+    case 'CLEAR_COMPILE_ERROR':
+      return { 
+        ...state, 
+        compileStatus: 'queued' as CompileStatus,
+        compileErrorDetail: undefined,
+        compileMessage: '等待编译',
+        compileProgress: 0
+      };
     
     case 'ADD_TO_HISTORY':
       return { 

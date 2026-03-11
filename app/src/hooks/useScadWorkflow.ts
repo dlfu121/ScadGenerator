@@ -9,9 +9,94 @@ interface UseScadWorkflowOptions {
   dispatch: AppDispatch;
 }
 
+function parseScalarValue(rawValue: string): string | number | boolean {
+  const normalized = rawValue.trim();
+
+  if (/^-?\d*\.?\d+$/.test(normalized)) {
+    return Number.parseFloat(normalized);
+  }
+
+  if (normalized === 'true') {
+    return true;
+  }
+
+  if (normalized === 'false') {
+    return false;
+  }
+
+  const quoted = normalized.match(/^(["'])(.*)\1$/);
+  if (quoted) {
+    return quoted[2];
+  }
+
+  return normalized;
+}
+
+function extractTopLevelParameters(code: string): Record<string, any> {
+  const nextParameters: Record<string, any> = {};
+  const declarationRegex = /^\s*([A-Za-z_]\w*)\s*=\s*([^;]+);\s*$/;
+
+  for (const line of code.split('\n')) {
+    const match = line.match(declarationRegex);
+    if (!match) {
+      continue;
+    }
+
+    const [, name, rawValue] = match;
+    nextParameters[name] = parseScalarValue(rawValue);
+  }
+
+  return nextParameters;
+}
+
+function toOpenSCADLiteral(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+
+  const escaped = String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
+function syncCodeWithParameters(code: string, parameters: Record<string, any>): string {
+  if (!code.trim()) {
+    return code;
+  }
+
+  const declarationRegex = /^(\s*)([A-Za-z_]\w*)(\s*=\s*)([^;]+)(;\s*)$/;
+  const nextLines = code.split('\n').map((line) => {
+    const match = line.match(declarationRegex);
+    if (!match) {
+      return line;
+    }
+
+    const [, indent, name, assign, existing, suffix] = match;
+    if (!(name in parameters)) {
+      return line;
+    }
+
+    const nextValue = toOpenSCADLiteral(parameters[name]);
+    if (existing.trim() === nextValue) {
+      return line;
+    }
+
+    return `${indent}${name}${assign}${nextValue}${suffix}`;
+  });
+
+  return nextLines.join('\n');
+}
+
 export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
   const compileAbortRef = useRef<AbortController | null>(null);
   const compileSeqRef = useRef(0);
+  const codeEditTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 始终指向最新 state，消除 setTimeout 回调中的旧闭包问题
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const compileModel = useCallback(async (openscadCode: string, parameters: Record<string, any>) => {
     compileAbortRef.current?.abort();
@@ -117,13 +202,40 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
 
   const handleParameterChange = useCallback(async (parameters: Record<string, any>) => {
     dispatch({ type: 'SET_PARAMETERS', payload: parameters });
+    const nextCode = syncCodeWithParameters(state.openscadCode, parameters);
+    if (nextCode !== state.openscadCode) {
+      dispatch({ type: 'SET_OPENSCAD_CODE', payload: nextCode });
+    }
 
     if (!state.openscadCode) {
       return;
     }
 
-    await compileModel(state.openscadCode, parameters);
+    await compileModel(nextCode, parameters);
   }, [compileModel, dispatch, state.openscadCode]);
+
+  const handleCodeChange = useCallback((openscadCode: string) => {
+    dispatch({ type: 'SET_OPENSCAD_CODE', payload: openscadCode });
+
+    // 立即提取参数并同步参数面板，不等待防抖——保证每次按键参数控制都实时更新
+    const extractedParameters = extractTopLevelParameters(openscadCode);
+    if (Object.keys(extractedParameters).length > 0) {
+      dispatch({ type: 'SET_PARAMETERS', payload: extractedParameters });
+    }
+
+    // 防抖：只对编译请求做节流，避免每个按键都触发一次服务端编译
+    if (codeEditTimerRef.current) {
+      clearTimeout(codeEditTimerRef.current);
+    }
+
+    codeEditTimerRef.current = setTimeout(async () => {
+      const latestExtracted = extractTopLevelParameters(openscadCode);
+      const paramsForCompile = Object.keys(latestExtracted).length > 0
+        ? latestExtracted
+        : stateRef.current.parameters;
+      await compileModel(openscadCode, paramsForCompile);
+    }, 500);
+  }, [compileModel, dispatch]);
 
   const handleRetry = useCallback(async () => {
     if (!state.openscadCode) {
@@ -136,10 +248,16 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     dispatch({ type: 'SET_ERROR', payload: '一键修复已预留，下一阶段接入 AI 自动修复。' });
   }, [dispatch]);
 
+  const handleCloseError = useCallback(() => {
+    dispatch({ type: 'CLEAR_COMPILE_ERROR' });
+  }, [dispatch]);
+
   return {
     handleGenerate,
     handleParameterChange,
+    handleCodeChange,
     handleRetry,
     handleFix,
+    handleCloseError,
   };
 }
