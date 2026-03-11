@@ -1,0 +1,35 @@
+{
+  "name": "scad-generator",
+  "version": "1.0.0",
+  "description": "参数化 OpenSCAD 生成工具",
+  "main": "dist/server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch backend/server/index.ts",
+    "dev:client": "vite",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p backend/tsconfig.json",
+    "start": "node dist/server/index.js",
+    "install:all": "npm install && cd app && npm install"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "openai": "^4.20.1",
+    "ws": "^8.14.2",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.17",
+    "@types/ws": "^8.5.10",
+    "@types/uuid": "^9.0.7",
+    "@types/node": "^20.10.5",
+    "typescript": "^5.3.3",
+    "tsx": "^4.6.2",
+    "concurrently": "^8.2.2",
+    "vite": "^5.0.10"
+  }
+}
