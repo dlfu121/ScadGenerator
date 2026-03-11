@@ -2,56 +2,17 @@ import React from 'react';
 import { StateProvider, useAppState } from './modules/state-session/StateSession';
 import { PromptInput } from './modules/prompt-input/PromptInput';
 import { ParamPreview } from './modules/param-preview/ParamPreview';
+import { useScadWorkflow } from './hooks/useScadWorkflow';
 
+// 页面主容器：协调输入、生成、参数预览三大模块。
 const AppContent: React.FC = () => {
   const { state, dispatch } = useAppState();
-
-  const handleGenerate = async (prompt: string) => {
-    dispatch({ type: 'SET_PROMPT', payload: prompt });
-    dispatch({ type: 'SET_LOADING', payload: true });
-    dispatch({ type: 'SET_ERROR', payload: undefined });
-
-    try {
-      const response = await fetch('/api/parametric-chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          prompt,
-          sessionId: state.sessionId
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error('生成失败');
-      }
-
-      const result = await response.json();
-      
-      dispatch({ type: 'SET_OPENSCAD_CODE', payload: result.openscadCode });
-      dispatch({ type: 'SET_PARAMETERS', payload: result.parameters });
-      
-      // 模拟编译STL
-      setTimeout(() => {
-        dispatch({ type: 'SET_STL_DATA', payload: 'mock-stl-data' });
-        dispatch({ type: 'SET_LOADING', payload: false });
-      }, 1000);
-
-    } catch (error) {
-      dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '未知错误' });
-      dispatch({ type: 'SET_LOADING', payload: false });
-    }
-  };
-
-  const handleParameterChange = (parameters: Record<string, any>) => {
-    dispatch({ type: 'SET_PARAMETERS', payload: parameters });
-    
-    // 重新编译（模拟）
-    setTimeout(() => {
-      dispatch({ type: 'SET_STL_DATA', payload: 'mock-stl-data-updated' });
-    }, 500);
-  };
+  const {
+    handleGenerate,
+    handleParameterChange,
+    handleRetry,
+    handleFix,
+  } = useScadWorkflow({ state, dispatch });
 
   return (
     <div className="app">
@@ -86,16 +47,22 @@ const AppContent: React.FC = () => {
             stlData={state.stlData}
             parameters={state.parameters}
             onParameterChange={handleParameterChange}
+            compileStatus={state.compileStatus}
+            compileProgress={state.compileProgress}
+            compileMessage={state.compileMessage}
+            compileError={state.compileErrorDetail || state.error}
+            onRetry={handleRetry}
+            onFix={handleFix}
           />
         </div>
       </main>
 
       <footer className="app-footer">
         <p>会话ID: {state.sessionId || '未连接'}</p>
-        <p>状态: {state.isLoading ? '处理中...' : '就绪'}</p>
+        <p>状态: {state.compileStatus} / {state.compileMessage}{state.isLoading ? ' (处理中...)' : ''}</p>
       </footer>
       
-      <style jsx>{`
+      <style>{`
         .app {
           min-height: 100vh;
           display: flex;
@@ -197,6 +164,7 @@ const AppContent: React.FC = () => {
   );
 };
 
+// 应用入口：把全局状态 Provider 包裹到页面内容外层。
 const App: React.FC = () => {
   return (
     <StateProvider>

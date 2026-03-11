@@ -1,78 +1,174 @@
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
+import { spawn } from 'child_process';
+
+export type CompileStatus = 'queued' | 'running' | 'success' | 'error';
+
+export interface CompileErrorDetail {
+  message: string;
+  stderr?: string;
+  stdout?: string;
+  exitCode?: number;
+  code?: string;
+}
+
 export interface CompileResult {
+  status: CompileStatus;
   success: boolean;
-  stlData?: string; // Base64编码的STL数据
+  stlData?: Buffer;
   error?: string;
+  detail?: CompileErrorDetail;
   compileTime?: number;
 }
 
 // 编译服务：统一封装 OpenSCAD 代码校验与 STL 产物生成。
 export class OpenSCADCompiler {
   private worker: any = null;
+  private readonly executable: string;
+
+  constructor() {
+    this.executable = process.env.OPENSCAD_BIN || 'openscad';
+  }
 
   // 对外编译入口，返回成功状态、产物和耗时信息。
   async compileToSTL(openscadCode: string, parameters: Record<string, any> = {}): Promise<CompileResult> {
     const startTime = Date.now();
+    const normalizedCode = this.normalizeOpenSCADCode(openscadCode);
     
     try {
-      // 当前为 MVP：用模拟逻辑代替 openscad-wasm，先打通端到端流程。
-      const stlData = await this.simulateCompilation(openscadCode, parameters);
+      const validation = await this.validateCode(normalizedCode);
+      if (!validation.valid) {
+        throw new Error(validation.errors.join('; '));
+      }
+
+      const stlData = await this.compileWithOpenSCAD(normalizedCode, parameters);
       
       return {
+        status: 'success',
         success: true,
         stlData,
         compileTime: Date.now() - startTime
       };
     } catch (error) {
+      const detail: CompileErrorDetail = {
+        message: error instanceof Error ? error.message : '编译失败'
+      };
+
       return {
+        status: 'error',
         success: false,
-        error: error instanceof Error ? error.message : '编译失败',
+        error: detail.message,
+        detail,
         compileTime: Date.now() - startTime
       };
     }
   }
 
-  private async simulateCompilation(code: string, parameters: Record<string, any>): Promise<string> {
-    // 模拟 OpenSCAD 编译耗时，便于前端观察加载态。
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // 仅做最小几何体存在性校验，避免返回完全无效结果。
-    if (!code.includes('cube') && !code.includes('sphere') && !code.includes('cylinder')) {
-      throw new Error('代码中未找到有效的3D几何体');
+  private async compileWithOpenSCAD(code: string, parameters: Record<string, any>): Promise<Buffer> {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'scad-generator-'));
+    const inputPath = path.join(tempRoot, 'input.scad');
+    const outputPath = path.join(tempRoot, 'output.stl');
+
+    try {
+      const parameterSource = this.serializeParameters(parameters);
+      await fs.writeFile(inputPath, `${parameterSource}\n${code}`, 'utf-8');
+
+      await this.runOpenSCAD(inputPath, outputPath);
+
+      const stlData = await fs.readFile(outputPath);
+      if (!stlData.length) {
+        throw new Error('OpenSCAD 未输出有效 STL 数据');
+      }
+      return stlData;
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true });
     }
-    
-    // 生成简化版 STL 文本并转 Base64，模拟真实编译产物格式。
-    const stlHeader = 'solid model\n';
-    const stlFooter = 'endsolid model\n';
-    
-    // 生成简单的三角形面片数据
-    const triangles = this.generateSimpleTriangles();
-    const stlBody = triangles.join('\n') + '\n';
-    
-    const stlContent = stlHeader + stlBody + stlFooter;
-    
-    // 转换为Base64
-    return Buffer.from(stlContent).toString('base64');
   }
 
-  private generateSimpleTriangles(): string[] {
-    // 返回示例三角面片，前端可据此完成渲染流程验证。
-    return [
-      '  facet normal 0 0 1',
-      '    outer loop',
-      '      vertex 0 0 0',
-      '      vertex 1 0 0',
-      '      vertex 0 1 0',
-      '    endloop',
-      '  endfacet',
-      '  facet normal 0 0 1',
-      '    outer loop',
-      '      vertex 1 0 0',
-      '      vertex 1 1 0',
-      '      vertex 0 1 0',
-      '    endloop',
-      '  endfacet',
-      // 添加更多面...
-    ];
+  private runOpenSCAD(inputPath: string, outputPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(
+        this.executable,
+        ['-o', outputPath, inputPath],
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true
+        }
+      );
+
+      let stdout = '';
+      let stderr = '';
+      const timeout = setTimeout(() => {
+        child.kill();
+      }, 60000);
+
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      child.on('error', (error) => {
+        clearTimeout(timeout);
+        reject(new Error(`OpenSCAD 启动失败: ${error.message}`));
+      });
+
+      child.on('close', (exitCode) => {
+        clearTimeout(timeout);
+
+        if (exitCode === 0) {
+          resolve();
+          return;
+        }
+
+        const reason = stderr.trim() || stdout.trim() || '未知编译错误';
+        reject(new Error(`OpenSCAD 编译失败(exit=${exitCode ?? -1}): ${reason}`));
+      });
+    });
+  }
+
+  private serializeParameters(parameters: Record<string, any>): string {
+    return Object.entries(parameters)
+      .map(([key, value]) => `${key} = ${this.toOpenSCADValue(value)};`)
+      .join('\n');
+  }
+
+  private normalizeOpenSCADCode(input: string): string {
+    let normalized = input.trim();
+
+    if ((normalized.startsWith('"') && normalized.endsWith('"')) || (normalized.startsWith("'") && normalized.endsWith("'"))) {
+      normalized = normalized.slice(1, -1).trim();
+    }
+
+    const fencedMatch = normalized.match(/^```(?:openscad|scad)?\s*([\s\S]*?)\s*```$/i);
+    if (fencedMatch?.[1]) {
+      normalized = fencedMatch[1].trim();
+    }
+
+    return normalized
+      .replace(/^```(?:openscad|scad)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+  }
+
+  private toOpenSCADValue(value: unknown): string {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+
+    if (typeof value === 'boolean') {
+      return value ? 'true' : 'false';
+    }
+
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => this.toOpenSCADValue(item)).join(', ')}]`;
+    }
+
+    const safeString = String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `"${safeString}"`;
   }
 
   async validateCode(code: string): Promise<{ valid: boolean; errors: string[] }> {

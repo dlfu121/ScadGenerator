@@ -5,9 +5,11 @@ interface PromptInputProps {
   isLoading: boolean;
 }
 
+// Prompt 输入模块：负责收集需求文本并触发生成。
 export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading }) => {
   const [prompt, setPrompt] = useState('');
 
+  // 提交时做最小校验，避免空字符串请求。
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (prompt.trim() && !isLoading) {
@@ -63,7 +65,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading 
         </ul>
       </div>
       
-      <style jsx>{`
+      <style>{`
         .prompt-input-module {
           background: #f5f5f5;
           padding: 20px;

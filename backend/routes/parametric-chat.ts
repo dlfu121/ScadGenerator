@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import OpenAI from 'openai';
 import { generateOpenSCAD } from '../services/ai-service';
+import { openscadCompiler } from '../services/openscad-compiler';
 
 // 前端发起参数化建模请求的最小入参。
 interface ParametricChatRequest {
@@ -13,6 +13,11 @@ interface ParametricChatResponse {
   openscadCode: string;
   parameters: Record<string, any>;
   sessionId: string;
+}
+
+interface CompileRequestBody {
+  openscadCode: string;
+  parameters?: Record<string, any>;
 }
 
 const router = Router();
@@ -42,6 +47,48 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
       parameters: {},
       sessionId: req.body.sessionId || ''
     } as ParametricChatResponse);
+  }
+});
+
+router.post('/compile', async (req: Request<{}, {}, CompileRequestBody>, res: Response) => {
+  const { openscadCode, parameters = {} } = req.body;
+
+  if (!openscadCode || !openscadCode.trim()) {
+    res.setHeader('X-Compile-Status', 'error');
+    return res.status(400).json({
+      status: 'error',
+      error: 'OpenSCAD 代码不能为空'
+    });
+  }
+
+  try {
+    const result = await openscadCompiler.compileToSTL(openscadCode, parameters);
+
+    if (!result.success || !result.stlData) {
+      res.setHeader('X-Compile-Status', 'error');
+      return res.status(422).json({
+        status: result.status,
+        error: result.error || '编译失败',
+        detail: result.detail,
+        compileTime: result.compileTime
+      });
+    }
+
+    res.setHeader('Content-Type', 'model/stl');
+    res.setHeader('X-Compile-Status', result.status);
+    if (typeof result.compileTime === 'number') {
+      res.setHeader('X-Compile-Time', result.compileTime.toString());
+    }
+    return res.status(200).send(result.stlData);
+  } catch (error) {
+    res.setHeader('X-Compile-Status', 'error');
+    return res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : '编译服务异常',
+      detail: {
+        message: error instanceof Error ? error.message : '编译服务异常'
+      }
+    });
   }
 });
 

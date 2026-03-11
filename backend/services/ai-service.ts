@@ -17,6 +17,10 @@ interface GenerateResult {
 
 export async function generateOpenSCAD(prompt: string, sessionId?: string): Promise<GenerateResult> {
   try {
+    if (!process.env.QN_API_KEY) {
+      throw new Error('未配置 QN_API_KEY，无法调用 AI 生成服务');
+    }
+
     // 通过 system prompt 约束模型输出为可执行的参数化 OpenSCAD 代码。
     const systemPrompt = `你是一个专业的OpenSCAD代码生成助手。请根据用户的需求生成参数化的OpenSCAD代码。
 
@@ -35,15 +39,20 @@ height = 20;
 // 模型生成
 cube([length, width, height]);`;
 
-    const response = await openai.chat.completions.create({
-      model: process.env.OPENSCAD_MODEL || 'deepseek-r1',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 2000,
-      temperature: 0.7,
-    });
+    const response = await Promise.race([
+      openai.chat.completions.create({
+        model: process.env.OPENSCAD_MODEL || 'deepseek-r1',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 2000,
+        temperature: 0.7,
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('AI 生成超时，请稍后重试')), 15000);
+      })
+    ]);
 
     // 容错：当模型无内容时，返回默认失败注释，避免后续流程崩溃。
     const openscadCode = response.choices[0]?.message?.content || '// 生成失败';

@@ -1,160 +1,31 @@
-import React, { useEffect, useRef, useState } from 'react';
-import * as THREE from 'three';
+import React from 'react';
+import { useThreePreview } from '../../hooks/useThreePreview';
 
 interface ParamPreviewProps {
-  stlData?: string; // Base64编码的STL数据
+  stlData?: ArrayBuffer;
   parameters: Record<string, any>;
+  compileStatus: 'queued' | 'running' | 'success' | 'error';
+  compileProgress: number;
+  compileMessage: string;
+  compileError?: string;
+  onRetry: () => void;
+  onFix: () => void;
   onParameterChange: (parameters: Record<string, any>) => void;
 }
 
+// 参数预览模块：负责 Three.js 画布渲染与参数联动。
 export const ParamPreview: React.FC<ParamPreviewProps> = ({
   stlData,
   parameters,
+  compileStatus,
+  compileProgress,
+  compileMessage,
+  compileError,
+  onRetry,
+  onFix,
   onParameterChange
 }) => {
-  const mountRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<THREE.Scene | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const meshRef = useRef<THREE.Mesh | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-
-  useEffect(() => {
-    if (!mountRef.current) return;
-
-    // 初始化Three.js场景
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf0f0f0);
-    sceneRef.current = scene;
-
-    // 设置相机
-    const camera = new THREE.PerspectiveCamera(
-      75,
-      mountRef.current.clientWidth / mountRef.current.clientHeight,
-      0.1,
-      1000
-    );
-    camera.position.set(50, 50, 50);
-    camera.lookAt(0, 0, 0);
-    cameraRef.current = camera;
-
-    // 设置渲染器
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
-    renderer.shadowMap.enabled = true;
-    mountRef.current.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
-
-    // 添加光源
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-    scene.add(ambientLight);
-
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.4);
-    directionalLight.position.set(50, 50, 50);
-    directionalLight.castShadow = true;
-    scene.add(directionalLight);
-
-    // 添加网格
-    const gridHelper = new THREE.GridHelper(100, 10);
-    scene.add(gridHelper);
-
-    // 添加坐标轴
-    const axesHelper = new THREE.AxesHelper(50);
-    scene.add(axesHelper);
-
-    // 鼠标控制
-    let mouseX = 0;
-    let mouseY = 0;
-    let isMouseDown = false;
-
-    const handleMouseMove = (event: MouseEvent) => {
-      if (!isMouseDown) return;
-      mouseX = (event.clientX / window.innerWidth) * 2 - 1;
-      mouseY = -(event.clientY / window.innerHeight) * 2 + 1;
-    };
-
-    const handleMouseDown = () => {
-      isMouseDown = true;
-    };
-
-    const handleMouseUp = () => {
-      isMouseDown = false;
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mousedown', handleMouseDown);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    // 动画循环
-    const animate = () => {
-      requestAnimationFrame(animate);
-
-      if (meshRef.current && isMouseDown) {
-        meshRef.current.rotation.y = mouseX * Math.PI;
-        meshRef.current.rotation.x = mouseY * Math.PI;
-      }
-
-      renderer.render(scene, camera);
-    };
-    animate();
-
-    // 处理窗口大小变化
-    const handleResize = () => {
-      if (!mountRef.current) return;
-      camera.aspect = mountRef.current.clientWidth / mountRef.current.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
-    };
-    window.addEventListener('resize', handleResize);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mousedown', handleMouseDown);
-      window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('resize', handleResize);
-      
-      if (mountRef.current && renderer.domElement) {
-        mountRef.current.removeChild(renderer.domElement);
-      }
-      renderer.dispose();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!stlData || !sceneRef.current) return;
-
-    setIsLoading(true);
-
-    // 模拟STL加载
-    setTimeout(() => {
-      // 创建简单的几何体作为演示
-      const geometry = new THREE.BoxGeometry(
-        parameters.length || 30,
-        parameters.height || 20,
-        parameters.width || 30
-      );
-      
-      const material = new THREE.MeshPhongMaterial({
-        color: 0x00ff00,
-        wireframe: false
-      });
-      
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-
-      // 移除旧的网格
-      if (meshRef.current && sceneRef.current) {
-        sceneRef.current.remove(meshRef.current);
-      }
-
-      if (sceneRef.current) {
-        sceneRef.current.add(mesh);
-      }
-      meshRef.current = mesh;
-      setIsLoading(false);
-    }, 500);
-  }, [stlData, parameters]);
+  const { mountRef, isLoadingMesh } = useThreePreview(stlData);
 
   const handleParameterChange = (paramName: string, value: any) => {
     const newParameters = { ...parameters, [paramName]: value };
@@ -167,9 +38,28 @@ export const ParamPreview: React.FC<ParamPreviewProps> = ({
       
       <div className="preview-container">
         <div ref={mountRef} className="three-canvas" />
-        {isLoading && (
+        {(isLoadingMesh || compileStatus === 'queued' || compileStatus === 'running') && (
           <div className="loading-overlay">
-            <div className="loading-spinner">加载中...</div>
+            <div className="loading-spinner">
+              <div className="progress-title">{compileMessage || '编译中'}</div>
+              <div className="progress-bar">
+                <div className="progress-bar-inner" style={{ width: `${compileProgress}%` }} />
+              </div>
+              <div className="progress-text">{compileProgress}%</div>
+            </div>
+          </div>
+        )}
+
+        {compileStatus === 'error' && (
+          <div className="error-overlay">
+            <div className="error-card">
+              <h4>编译失败</h4>
+              <p>{compileError || '未知错误'}</p>
+              <div className="error-actions">
+                <button type="button" onClick={onRetry}>重试</button>
+                <button type="button" className="fix-btn" onClick={onFix}>一键修复</button>
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -194,7 +84,7 @@ export const ParamPreview: React.FC<ParamPreviewProps> = ({
         ))}
       </div>
       
-      <style jsx>{`
+      <style>{`
         .param-preview-module {
           display: flex;
           flex-direction: column;
@@ -228,8 +118,88 @@ export const ParamPreview: React.FC<ParamPreviewProps> = ({
         }
 
         .loading-spinner {
-          font-size: 18px;
+          width: min(80%, 360px);
           color: #333;
+        }
+
+        .progress-title {
+          font-size: 14px;
+          margin-bottom: 8px;
+          text-align: center;
+        }
+
+        .progress-bar {
+          width: 100%;
+          height: 8px;
+          background: #dbe4f0;
+          border-radius: 999px;
+          overflow: hidden;
+        }
+
+        .progress-bar-inner {
+          height: 100%;
+          background: linear-gradient(90deg, #0f766e, #1d4ed8);
+          transition: width 180ms ease;
+        }
+
+        .progress-text {
+          text-align: right;
+          margin-top: 6px;
+          font-size: 12px;
+          color: #475569;
+        }
+
+        .error-overlay {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: rgba(15, 23, 42, 0.35);
+          padding: 12px;
+        }
+
+        .error-card {
+          width: min(90%, 420px);
+          background: #fff;
+          border-radius: 10px;
+          padding: 14px;
+          border: 1px solid #fecaca;
+          box-shadow: 0 8px 22px rgba(0, 0, 0, 0.15);
+        }
+
+        .error-card h4 {
+          margin: 0 0 8px;
+          color: #b91c1c;
+        }
+
+        .error-card p {
+          margin: 0;
+          color: #334155;
+          font-size: 13px;
+          line-height: 1.45;
+          max-height: 130px;
+          overflow: auto;
+          white-space: pre-wrap;
+        }
+
+        .error-actions {
+          margin-top: 12px;
+          display: flex;
+          gap: 8px;
+        }
+
+        .error-actions button {
+          border: 0;
+          background: #1d4ed8;
+          color: #fff;
+          border-radius: 6px;
+          padding: 7px 10px;
+          cursor: pointer;
+        }
+
+        .error-actions .fix-btn {
+          background: #0f766e;
         }
 
         .parameters-panel {
