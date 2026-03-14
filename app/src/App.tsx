@@ -11,6 +11,7 @@ const AppContent: React.FC = () => {
     handleGenerate,
     handleParameterChange,
     handleCodeChange,
+    handleCompileNow,
     handleRetry,
     handleFix,
     handleCloseError,
@@ -26,16 +27,32 @@ const AppContent: React.FC = () => {
       <main className="app-main">
         <section className="column left-column">
           <div className="panel top-panel code-panel">
-            <h3>生成的OpenSCAD代码</h3>
+            <div className="code-panel-header">
+              <h3>生成的OpenSCAD代码</h3>
+              <button
+                type="button"
+                className="compile-now-button"
+                onClick={handleCompileNow}
+                disabled={!state.openscadCode.trim() || state.isLoading}
+              >
+                立即编译
+              </button>
+            </div>
             <textarea
               value={state.openscadCode}
               onChange={(event) => handleCodeChange(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                  event.preventDefault();
+                  void handleCompileNow();
+                }
+              }}
               className="code-editor"
               rows={16}
               spellCheck={false}
               placeholder="先输入自然语言并点击生成，或直接在此粘贴/编辑 OpenSCAD 代码"
             />
-            <p className="code-editor-tip">编辑代码后将自动同步参数控制并重新编译预览。</p>
+            <p className="code-editor-tip">编辑代码后将自动同步参数控制并重新编译预览。按 Ctrl+Enter 可立即编译。</p>
             {state.error && (
               <div className="error-message">
                 错误: {state.error}
@@ -155,9 +172,33 @@ const AppContent: React.FC = () => {
           margin-top: 20px;
         }
 
+        .code-panel-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 10px;
+        }
+
         .code-panel h3 {
-          margin: 0 0 10px 0;
+          margin: 0;
           color: #495057;
+        }
+
+        .compile-now-button {
+          border: 0;
+          border-radius: 6px;
+          background: #0f766e;
+          color: #fff;
+          padding: 8px 12px;
+          font-size: 13px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .compile-now-button:disabled {
+          background: #94a3b8;
+          cursor: not-allowed;
         }
 
         .code-editor {
@@ -172,7 +213,7 @@ const AppContent: React.FC = () => {
           line-height: 1.4;
           resize: vertical;
           min-height: 320px;
-          height: calc(100% - 56px);
+          height: calc(100% - 96px);
         }
 
         .code-editor-tip {

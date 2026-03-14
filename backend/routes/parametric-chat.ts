@@ -11,8 +11,10 @@ interface ParametricChatRequest {
 // 统一返回结构，便于前端状态管理。
 interface ParametricChatResponse {
   openscadCode: string;
+  compilableCode?: string;
   parameters: Record<string, any>;
   sessionId: string;
+  error?: string;
 }
 
 interface CompileRequestBody {
@@ -31,6 +33,7 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
     if (!prompt) {
       return res.status(400).json({
         openscadCode: '',
+        compilableCode: '',
         parameters: {},
         sessionId: sessionId || ''
       } as ParametricChatResponse);
@@ -42,10 +45,13 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
   } catch (error) {
     // 失败时返回可渲染的兜底结构，避免前端空对象判断复杂化。
     console.error('AI生成错误:', error);
+    const fallback = (error as { fallbackResult?: ParametricChatResponse })?.fallbackResult;
     res.status(500).json({
-      openscadCode: '// 生成失败',
-      parameters: {},
-      sessionId: req.body.sessionId || ''
+      openscadCode: fallback?.openscadCode || '',
+      compilableCode: fallback?.compilableCode || fallback?.openscadCode || '',
+      parameters: fallback?.parameters || {},
+      sessionId: fallback?.sessionId || req.body.sessionId || '',
+      error: error instanceof Error ? error.message : '生成失败'
     } as ParametricChatResponse);
   }
 });

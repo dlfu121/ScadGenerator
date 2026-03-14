@@ -178,19 +178,25 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
         }),
       });
 
-      if (!response.ok) {
-        const errorPayload = await response.json().catch(() => ({ error: '生成失败' }));
-        throw new Error(errorPayload.error || '生成失败');
+      const result = await response.json().catch(() => null);
+
+      if (result && Object.prototype.hasOwnProperty.call(result, 'openscadCode')) {
+        dispatch({ type: 'SET_OPENSCAD_CODE', payload: result.openscadCode });
       }
 
-      const result = await response.json();
-      dispatch({ type: 'SET_OPENSCAD_CODE', payload: result.openscadCode });
-      dispatch({ type: 'SET_PARAMETERS', payload: result.parameters });
-      if (result.sessionId) {
+      if (result && Object.prototype.hasOwnProperty.call(result, 'parameters') && typeof result.parameters === 'object') {
+        dispatch({ type: 'SET_PARAMETERS', payload: result.parameters });
+      }
+
+      if (result?.sessionId) {
         dispatch({ type: 'SET_SESSION_ID', payload: result.sessionId });
       }
 
-      await compileModel(result.openscadCode, result.parameters);
+      if (!response.ok) {
+        throw new Error(result?.error || '生成失败');
+      }
+
+      await compileModel(result.compilableCode || result.openscadCode, result.parameters);
     } catch (error) {
       dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '未知错误' });
       dispatch({ type: 'SET_COMPILE_STATUS', payload: 'error' });
@@ -228,13 +234,39 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
       clearTimeout(codeEditTimerRef.current);
     }
 
+    // 在错误态下加快重编译反馈，减少“改完代码没反应”的体感。
+    const debounceMs = stateRef.current.compileStatus === 'error' ? 180 : 500;
+
     codeEditTimerRef.current = setTimeout(async () => {
       const latestExtracted = extractTopLevelParameters(openscadCode);
       const paramsForCompile = Object.keys(latestExtracted).length > 0
         ? latestExtracted
         : stateRef.current.parameters;
       await compileModel(openscadCode, paramsForCompile);
-    }, 500);
+    }, debounceMs);
+  }, [compileModel, dispatch]);
+
+  const handleCompileNow = useCallback(async () => {
+    if (codeEditTimerRef.current) {
+      clearTimeout(codeEditTimerRef.current);
+      codeEditTimerRef.current = null;
+    }
+
+    const currentCode = stateRef.current.openscadCode;
+    if (!currentCode.trim()) {
+      return;
+    }
+
+    const latestExtracted = extractTopLevelParameters(currentCode);
+    const paramsForCompile = Object.keys(latestExtracted).length > 0
+      ? latestExtracted
+      : stateRef.current.parameters;
+
+    if (Object.keys(latestExtracted).length > 0) {
+      dispatch({ type: 'SET_PARAMETERS', payload: latestExtracted });
+    }
+
+    await compileModel(currentCode, paramsForCompile);
   }, [compileModel, dispatch]);
 
   const handleRetry = useCallback(async () => {
@@ -256,6 +288,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     handleGenerate,
     handleParameterChange,
     handleCodeChange,
+    handleCompileNow,
     handleRetry,
     handleFix,
     handleCloseError,

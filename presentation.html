@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ScadGenerator — 项目演示</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css" />
+  <style>
+    :root {
+      --accent: #4ade80;
+      --accent2: #60a5fa;
+      --accent3: #f59e0b;
+    }
+
+    .reveal h1, .reveal h2, .reveal h3 {
+      text-transform: none;
+      letter-spacing: 0.02em;
+    }
+
+    .reveal h1 { color: var(--accent); font-size: 2em; }
+    .reveal h2 { color: var(--accent2); font-size: 1.5em; }
+    .reveal h3 { color: var(--accent3); font-size: 1.1em; }
+
+    .tag {
+      display: inline-block;
+      background: rgba(74, 222, 128, 0.15);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      border-radius: 4px;
+      padding: 2px 10px;
+      font-size: 0.6em;
+      margin: 0 4px;
+      vertical-align: middle;
+    }
+
+    .card-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .card {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 18px 20px;
+      text-align: left;
+    }
+
+    .card .icon { font-size: 1.8em; }
+    .card h3 { margin: 6px 0 4px; font-size: 0.85em; }
+    .card p  { font-size: 0.65em; color: #aaa; margin: 0; line-height: 1.5; }
+
+    .flow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 24px;
+    }
+
+    .flow-box {
+      background: rgba(96, 165, 250, 0.15);
+      border: 1px solid var(--accent2);
+      color: #fff;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.65em;
+      white-space: nowrap;
+    }
+
+    .flow-arrow { color: #666; font-size: 1.2em; }
+
+    .status-table { width: 100%; border-collapse: collapse; font-size: 0.7em; }
+    .status-table th {
+      background: rgba(255,255,255,0.08);
+      padding: 8px 12px;
+      text-align: left;
+      color: var(--accent2);
+    }
+    .status-table td { padding: 7px 12px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .done { color: var(--accent); }
+    .todo { color: var(--accent3); }
+
+    .highlight { color: var(--accent); font-weight: bold; }
+    .muted { color: #888; font-size: 0.75em; }
+
+    .split {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      text-align: left;
+    }
+
+    .split ul { font-size: 0.72em; line-height: 1.9; padding-left: 1.2em; }
+
+    .big-number {
+      font-size: 3em;
+      font-weight: 900;
+      color: var(--accent);
+      line-height: 1;
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-around;
+      margin-top: 20px;
+    }
+
+    .stat-item { text-align: center; }
+    .stat-item p { font-size: 0.7em; color: #aaa; margin: 4px 0 0; }
+
+    code.inline {
+      background: rgba(255,255,255,0.1);
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.85em;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ① 封面 -->
+<section>
+  <div style="margin-bottom:16px; font-size:3em;">🔩</div>
+  <h1>ScadGenerator</h1>
+  <p style="color:#aaa; font-size:0.8em; margin:0;">参数化 OpenSCAD AI 生成工具</p>
+  <div style="margin-top:28px;">
+    <span class="tag">TypeScript</span>
+    <span class="tag">React</span>
+    <span class="tag">Node.js</span>
+    <span class="tag">Three.js</span>
+    <span class="tag">DeepSeek AI</span>
+  </div>
+  <p class="muted" style="margin-top:32px;">自然语言 → OpenSCAD 代码 → 实时 3D 预览</p>
+</section>
+
+<!-- ② 背景与动机 -->
+<section>
+  <h2>背景与动机</h2>
+  <div class="card-grid">
+    <div class="card">
+      <div class="icon">🧱</div>
+      <h3>OpenSCAD 门槛高</h3>
+      <p>参数化 3D 建模需要手写代码，对非程序员不友好</p>
+    </div>
+    <div class="card">
+      <div class="icon">🤖</div>
+      <h3>AI 降低壁垒</h3>
+      <p>大模型可以将自然语言转换为结构化代码</p>
+    </div>
+    <div class="card">
+      <div class="icon">🔄</div>
+      <h3>参数联动痛点</h3>
+      <p>手动修改代码尺寸效率低，需要实时可视化反馈</p>
+    </div>
+    <div class="card">
+      <div class="icon">🌐</div>
+      <h3>全栈整合</h3>
+      <p>将 AI 生成、编译、渲染整合进一个 Web 应用</p>
+    </div>
+  </div>
+</section>
+
+<!-- ③ 整体架构 -->
+<section>
+  <h2>整体架构</h2>
+  <div class="flow">
+    <div class="flow-box">👤 用户输入<br/><span style="color:#888;font-size:0.9em">自然语言描述</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box">🤖 AI 服务<br/><span style="color:#888;font-size:0.9em">DeepSeek API</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box">🔧 代码后处理<br/><span style="color:#888;font-size:0.9em">清洗 / 提取</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box">⚙️ OpenSCAD 编译<br/><span style="color:#888;font-size:0.9em">→ STL</span></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box">🖥️ Three.js 渲染<br/><span style="color:#888;font-size:0.9em">实时 3D 预览</span></div>
+  </div>
+  <div style="margin-top:24px; font-size:0.65em; color:#888; text-align:center;">
+    前端 (Vite 5173) ←→ 后端 Express (5000) ←→ WebSocket 会话同步
+  </div>
+</section>
+
+<!-- ④ 技术栈 -->
+<section>
+  <h2>技术栈</h2>
+  <div class="split">
+    <div>
+      <h3>前端</h3>
+      <ul>
+        <li>React 18 + TypeScript</li>
+        <li>Vite 5（HMR 热更新）</li>
+        <li>Three.js + STLLoader</li>
+        <li>参数面板（滑块实时回写）</li>
+      </ul>
+      <h3>AI / Python</h3>
+      <ul>
+        <li>OpenAI SDK（兼容七牛 DeepSeek）</li>
+        <li>openai-agents SDK</li>
+        <li>System Prompt 强约束输出</li>
+      </ul>
+    </div>
+    <div>
+      <h3>后端</h3>
+      <ul>
+        <li>Node.js + Express</li>
+        <li>tsx watch 热重载</li>
+        <li>WebSocket（指数退避重连）</li>
+        <li>AbortController 并发控制</li>
+      </ul>
+      <h3>编译</h3>
+      <ul>
+        <li>OpenSCAD CLI（本地安装）</li>
+        <li>临时文件隔离</li>
+        <li>queued/running/success/error 四态</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ⑤ 核心功能演示 -->
+<section>
+  <h2>核心功能</h2>
+  <div class="card-grid" style="grid-template-columns:1fr 1fr 1fr; gap:12px;">
+    <div class="card">
+      <div class="icon">💬</div>
+      <h3>自然语言建模</h3>
+      <p>输入描述即可生成参数化 OpenSCAD 代码</p>
+    </div>
+    <div class="card">
+      <div class="icon">🎚️</div>
+      <h3>参数实时调节</h3>
+      <p>滑块拖动 → 代码同步更新 → 自动重编译</p>
+    </div>
+    <div class="card">
+      <div class="icon">🖼️</div>
+      <h3>3D 实时预览</h3>
+      <p>Three.js 加载 STL，支持旋转 / 缩放</p>
+    </div>
+    <div class="card">
+      <div class="icon">🔁</div>
+      <h3>会话持久化</h3>
+      <p>WebSocket 同步，刷新不丢失历史对话</p>
+    </div>
+    <div class="card">
+      <div class="icon">🛠️</div>
+      <h3>错误恢复</h3>
+      <p>编译失败显示结构化错误 + 一键 AI 修复</p>
+    </div>
+    <div class="card">
+      <div class="icon">⚡</div>
+      <h3>并发控制</h3>
+      <p>连续调参只保留最后一次编译结果</p>
+    </div>
+  </div>
+</section>
+
+<!-- ⑥ 项目进展 -->
+<section>
+  <h2>项目进展</h2>
+  <table class="status-table">
+    <thead>
+      <tr><th>模块</th><th>状态</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>AI 代码生成</td><td class="done">✅ 完成</td><td>DeepSeek 接入，60s 超时保护</td></tr>
+      <tr><td>代码后处理</td><td class="done">✅ 完成</td><td>自动剥离 Markdown 围栏</td></tr>
+      <tr><td>后端编译链路</td><td class="done">✅ 完成</td><td>调用本地 OpenSCAD CLI → STL</td></tr>
+      <tr><td>前端 3D 渲染</td><td class="done">✅ 完成</td><td>STLLoader + 法线 + 资源释放</td></tr>
+      <tr><td>参数面板</td><td class="done">✅ 完成</td><td>正则解析顶层变量 + 滑块联动</td></tr>
+      <tr><td>编译进度反馈</td><td class="done">✅ 完成</td><td>四态进度条 + 错误详情</td></tr>
+      <tr><td>AbortController</td><td class="done">✅ 完成</td><td>取消过期请求，最新结果优先</td></tr>
+      <tr><td>WebSocket 会话</td><td class="done">✅ 完成</td><td>指数退避重连</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ⑦ 不足与规划 -->
+<section>
+  <h2>不足与规划</h2>
+  <div class="split">
+    <div>
+      <h3>当前不足</h3>
+      <ul>
+        <li>编译依赖本地 OpenSCAD 安装</li>
+        <li>3D 渲染缺 OrbitControls</li>
+        <li>无用户认证体系</li>
+        <li>AI 修复未深度实现</li>
+        <li>无 STL 导出按钮</li>
+        <li>无自动化测试覆盖</li>
+      </ul>
+    </div>
+    <div>
+      <h3>后续规划</h3>
+      <ul>
+        <li>集成 <span class="highlight">openscad-wasm</span>，实现零依赖浏览器端编译</li>
+        <li>引入 <span class="highlight">OrbitControls</span> 提升交互体验</li>
+        <li>用户登录 + 多会话管理</li>
+        <li>STL / SCAD 文件一键下载</li>
+        <li>AI 结构化错误定位修复</li>
+        <li>端到端集成测试</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ⑧ 快速启动 -->
+<section>
+  <h2>快速启动</h2>
+  <pre style="font-size:0.6em; text-align:left; background:rgba(255,255,255,0.06); border-radius:10px; padding:20px; line-height:1.8;"><code class="language-bash"># 1. 克隆仓库
+git clone https://github.com/dlfu121/ScadGenerator.git
+cd ScadGenerator
+
+# 2. 配置 API Key
+cp .env.example .env
+# 编辑 .env，填写 QINIU_DEEPSEEK_API_KEY
+
+# 3. 安装依赖
+npm run install:all
+
+# 4. 启动
+npm run dev
+
+# 前端: http://localhost:5173
+# 后端: http://localhost:5000</code></pre>
+</section>
+
+<!-- ⑨ 总结 -->
+<section>
+  <h1 style="font-size:1.6em;">总结</h1>
+  <div class="stat-row" style="margin-top:32px;">
+    <div class="stat-item">
+      <div class="big-number">6</div>
+      <p>核心功能模块</p>
+    </div>
+    <div class="stat-item">
+      <div class="big-number">8</div>
+      <p>已完成子任务</p>
+    </div>
+    <div class="stat-item">
+      <div class="big-number">1</div>
+      <p>命令启动全栈</p>
+    </div>
+  </div>
+  <p style="margin-top:40px; font-size:0.75em; color:#aaa;">
+    ScadGenerator 将 <span class="highlight">AI 生成</span>、<span style="color:var(--accent2)">参数化控制</span>、<span style="color:var(--accent3)">实时渲染</span> 整合为一体，<br/>让非专业用户也能轻松创建 3D 参数化模型。
+  </p>
+  <p style="margin-top:20px;">
+    <a href="https://github.com/dlfu121/ScadGenerator" style="color:var(--accent2); font-size:0.75em;">
+      github.com/dlfu121/ScadGenerator
+    </a>
+  </p>
+</section>
+
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    transition: 'slide',
+    transitionSpeed: 'fast',
+    controls: true,
+    progress: true,
+    slideNumber: 'c/t',
+    plugins: []
+  });
+</script>
+</body>
+</html>

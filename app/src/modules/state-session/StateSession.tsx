@@ -141,45 +141,70 @@ export const StateProvider: React.FC<StateProviderProps> = ({ children }) => {
   // WebSocket 连接管理：负责 session 同步与参数更新消息。
   useEffect(() => {
     let shouldIgnoreClose = false;
-    const ws = new WebSocket('ws://localhost:5000');
-    
-    ws.onopen = () => {
-      console.log('WebSocket连接已建立');
-      dispatch({ type: 'SET_SESSION_ID', payload: generateSessionId() });
-      dispatch({ type: 'SET_ERROR', payload: undefined });
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let ws: WebSocket | null = null;
+
+    const scheduleReconnect = () => {
+      if (shouldIgnoreClose || reconnectTimer) {
+        return;
+      }
+
+      const delay = Math.min(1000 * 2 ** reconnectAttempts, 5000);
+      reconnectAttempts += 1;
+      dispatch({ type: 'SET_ERROR', payload: `连接已断开，正在重连（${Math.round(delay / 1000)}秒）` });
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, delay);
     };
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      
-      switch (data.type) {
-        case 'connected':
-          dispatch({ type: 'SET_SESSION_ID', payload: data.sessionId });
-          break;
-        case 'parameters_updated':
-          dispatch({ type: 'SET_PARAMETERS', payload: data.parameters });
-          break;
-      }
+    const connect = () => {
+      ws = new WebSocket('ws://localhost:5000');
+
+      ws.onopen = () => {
+        console.log('WebSocket连接已建立');
+        reconnectAttempts = 0;
+        dispatch({ type: 'SET_ERROR', payload: undefined });
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        switch (data.type) {
+          case 'connected':
+            dispatch({ type: 'SET_SESSION_ID', payload: data.sessionId || generateSessionId() });
+            dispatch({ type: 'SET_ERROR', payload: undefined });
+            break;
+          case 'parameters_updated':
+            dispatch({ type: 'SET_PARAMETERS', payload: data.parameters });
+            break;
+        }
+      };
+
+      ws.onerror = (error) => {
+        if (!shouldIgnoreClose) {
+          console.error('WebSocket错误:', error);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket连接已关闭');
+        if (!shouldIgnoreClose) {
+          scheduleReconnect();
+        }
+      };
     };
 
-    ws.onerror = (error) => {
-      if (!shouldIgnoreClose) {
-        console.error('WebSocket错误:', error);
-        dispatch({ type: 'SET_ERROR', payload: 'WebSocket连接失败' });
-      }
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket连接已关闭');
-      if (!shouldIgnoreClose) {
-        dispatch({ type: 'SET_ERROR', payload: '连接已断开' });
-      }
-    };
+    connect();
 
     return () => {
       // React StrictMode 开发环境会触发一次额外卸载，这里忽略预期关闭。
       shouldIgnoreClose = true;
-      ws.close();
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      ws?.close();
     };
   }, []);
 

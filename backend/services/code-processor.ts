@@ -15,13 +15,8 @@ export interface Parameter {
 // 代码后处理总入口：清洗、提参、基础校验。
 export function processOpenSCADCode(rawCode: string): ProcessedCode {
   const errors: string[] = [];
-  let cleanedCode = rawCode.trim();
-  
-  // 先做轻量清洗：移除注释与空行，便于后续参数提取与语法检查。
-  cleanedCode = cleanedCode
-    .split('\n')
-    .filter(line => !line.trim().startsWith('//') && line.trim() !== '')
-    .join('\n');
+  const normalized = normalizeModelOutput(rawCode);
+  const cleanedCode = extractOpenSCADCandidate(normalized);
 
   // 从 `name = value;` 风格语句中提取参数。
   const parameters = extractParameters(cleanedCode);
@@ -35,6 +30,88 @@ export function processOpenSCADCode(rawCode: string): ProcessedCode {
     parameters,
     errors
   };
+}
+
+function normalizeModelOutput(rawCode: string): string {
+  return rawCode
+    .replace(/\r\n?/g, '\n')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/think>/gi, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '\n')
+    .trim();
+}
+
+function extractOpenSCADCandidate(normalized: string): string {
+  if (!normalized) {
+    return '';
+  }
+
+  const fencedBlocks = [...normalized.matchAll(/```(?:openscad|scad)?\s*([\s\S]*?)```/gi)]
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+
+  const candidateSource = fencedBlocks.length > 0
+    ? fencedBlocks[fencedBlocks.length - 1]
+    : normalized;
+
+  const lines = candidateSource
+    .split('\n')
+    .map((line) => stripInlineNoise(line))
+    .filter((line) => line.trim() !== '');
+
+  if (fencedBlocks.length > 0) {
+    return lines.join('\n').trim();
+  }
+
+  const firstCodeLine = lines.findIndex((line) => isLikelyOpenSCADLine(line));
+  if (firstCodeLine === -1) {
+    return lines.join('\n').trim();
+  }
+
+  let lastCodeLine = firstCodeLine;
+  for (let index = firstCodeLine; index < lines.length; index += 1) {
+    if (isLikelyOpenSCADLine(lines[index]) || isStructuralContinuationLine(lines[index])) {
+      lastCodeLine = index;
+    }
+  }
+
+  return lines
+    .slice(firstCodeLine, lastCodeLine + 1)
+    .filter((line) => isLikelyOpenSCADLine(line) || isStructuralContinuationLine(line))
+    .join('\n')
+    .trim();
+}
+
+function stripInlineNoise(line: string): string {
+  return line
+    .replace(/^```(?:openscad|scad)?\s*/i, '')
+    .replace(/```$/i, '')
+    .replace(/^\s*\/\*+\s*$/, '')
+    .replace(/^\s*\*\/\s*$/, '')
+    .replace(/\s*\/\/.*$/, '')
+    .trimRight();
+}
+
+function isLikelyOpenSCADLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /^(module|function|for|if|else|let|each)\b/.test(trimmed)
+    || /^[A-Za-z_]\w*\s*=/.test(trimmed)
+    || /^(cube|sphere|cylinder|polyhedron|polygon|circle|square|text|translate|rotate|scale|mirror|resize|color|offset|minkowski|hull|union|difference|intersection|linear_extrude|rotate_extrude|projection|multmatrix|surface|import|render|echo)\b/.test(trimmed)
+    || /^[{}]$/.test(trimmed)
+    || /[;{}]$/.test(trimmed);
+}
+
+function isStructuralContinuationLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /^[\[\]{}(),.+\-*/\d\s]+,?$/.test(trimmed);
 }
 
 function extractParameters(code: string): Parameter[] {
