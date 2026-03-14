@@ -29,3 +29,9 @@ Thumbs.db
 # 临时文件
 *.tmp
 *.temp
+
+# 演示/汇报文件
+presentation.html
+build_ppt.py
+*.pptx
+pictures/
