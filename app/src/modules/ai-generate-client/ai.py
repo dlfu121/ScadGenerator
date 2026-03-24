@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 from pathlib import Path
+import json
 
 from agents import (
 	Agent,
@@ -33,16 +34,33 @@ def configure_client() -> None:
 	set_tracing_disabled(True)
 
 
-def build_agent() -> Agent:
-	model = os.getenv("OPENSCAD_MODEL", "deepseek-r1")
+def build_agent(agent_name: str = "openscad-generator") -> Agent:
+	"""Build an agent based on the specified agent name."""
+	model = os.getenv("OPENSCAD_MODEL", "deepseek-r1") if agent_name == "openscad-generator" else "claude-4.5-sonnet"
+	instructions = (
+		"You generate valid OpenSCAD code from user requirements. "
+		"Return a JSON object with two fields: 'code' for OpenSCAD source code and 'reasoning' for the thought process. "
+		"Use parametric variables where useful and keep code runnable."
+		if agent_name == "openscad-generator"
+		else (
+			"You are a general-purpose assistant capable of generating responses based on user prompts. "
+			"Return a JSON object with two fields: 'code' for the generated content and 'reasoning' for the thought process."
+		)
+	)
+
+	# Add a new environment variable for the Claude-4.5-Sonnet API key
+	claude_api_key = os.getenv("CLAUDE_API_KEY")
+	if not claude_api_key:
+		raise RuntimeError("Missing env var CLAUDE_API_KEY")
+
+	if agent_name == "claude-4.5-sonnet":
+		custom_client = AsyncOpenAI(base_url="https://api.qnaigc.com/v1", api_key=claude_api_key)
+		set_default_openai_client(custom_client)
+
 	return Agent(
-		name="openscad-generator",
+		name=agent_name,
 		model=model,
-		instructions=(
-			"You generate valid OpenSCAD code from user requirements. "
-			"Return only OpenSCAD source code. "
-			"Use parametric variables where useful and keep code runnable."
-		),
+		instructions=instructions,
 	)
 
 
@@ -57,16 +75,35 @@ def extract_scad(text: str) -> str:
 def main() -> None:
 	load_dotenv(dotenv_path=PROJECT_ROOT / ".env")
 
-	parser = argparse.ArgumentParser(description="Generate OpenSCAD code from a natural language prompt")
-	parser.add_argument("prompt", help="Natural language prompt for OpenSCAD generation")
+	parser = argparse.ArgumentParser(description="Generate code from a natural language prompt")
+	parser.add_argument("prompt", help="Natural language prompt for code generation")
+	parser.add_argument(
+		"--agent", default="openscad-generator", help="Specify the agent to use (default: openscad-generator)"
+	)
 	args = parser.parse_args()
 
 	configure_client()
-	openscad_agent = build_agent()
+	agent = build_agent(args.agent)
 
-	result = Runner.run_sync(openscad_agent, args.prompt)
-	output = extract_scad(str(result.final_output))
-	print(output)
+	result = Runner.run_sync(agent, args.prompt)
+
+	# Extract JSON content from result.final_output
+	final_output_raw = result.final_output
+	if isinstance(final_output_raw, str):
+		match = re.search(r"```json\s*(\{.*?\})\s*```", final_output_raw, re.DOTALL)
+		if match:
+			final_output_raw = match.group(1)
+
+	try:
+		final_output = json.loads(final_output_raw) if isinstance(final_output_raw, str) else final_output_raw
+	except Exception as e:
+		raise RuntimeError(f"Failed to parse final_output as JSON: {e}")
+
+	output = extract_scad(str(final_output.get("code", "")))
+	reasoning = final_output.get("reasoning", "No reasoning provided.")
+
+	print("Generated Code:\n", output)
+	print("\nAI Reasoning:\n", reasoning)
 
 
 if __name__ == "__main__":

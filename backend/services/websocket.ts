@@ -85,6 +85,14 @@ function broadcastToSession(sessionId: string, message: any) {
   }
 }
 
+export function emitSessionEvent(sessionId: string, event: Record<string, unknown>) {
+  if (!sessionId) {
+    return;
+  }
+
+  broadcastToSession(sessionId, event);
+}
+
 export function getSession(sessionId: string): ClientSession | undefined {
   return sessions.get(sessionId);
 }

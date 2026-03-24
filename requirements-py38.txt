@@ -1,0 +1,14 @@
+# Python 3.8 compatible dependencies for ScadGenerator.
+#
+# Notes:
+# 1. The current ai.py client uses `openai-agents`, but the official
+#    `openai-agents` package requires Python 3.10+ and is therefore not
+#    included here.
+# 2. This file covers the packages that can be installed and used under
+#    Python 3.8, including `.env` loading, OpenAI-compatible client access,
+#    and PPT generation.
+
+openai>=1.50.0,<2.0.0
+python-dotenv>=1.0.1,<1.1.0
+python-pptx>=1.0.2,<1.1.0
+eval_type_backport>=0.3.0,<0.4.0

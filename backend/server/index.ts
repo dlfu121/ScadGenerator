@@ -1,18 +1,16 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import parametricChatRouter from '../routes/parametric-chat';
 import { createWebSocketServer } from '../services/websocket';
 
-// 加载环境变量（API Key、端口等）。
-dotenv.config();
-
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '5mb';
 
 // 基础中间件：允许跨域并解析 JSON 请求体。
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
 // 挂载参数化对话接口。
 app.use('/api/parametric-chat', parametricChatRouter);

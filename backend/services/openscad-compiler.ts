@@ -22,13 +22,26 @@ export interface CompileResult {
   compileTime?: number;
 }
 
+export type ArtifactFormat = 'stl' | 'csg';
+
+export interface ArtifactResult {
+  success: boolean;
+  data?: Buffer;
+  error?: string;
+  detail?: CompileErrorDetail;
+  compileTime?: number;
+}
+
 // 编译服务：统一封装 OpenSCAD 代码校验与 STL 产物生成。
 export class OpenSCADCompiler {
   private worker: any = null;
   private readonly executable: string;
+  private readonly compileTimeoutMs: number;
 
   constructor() {
     this.executable = process.env.OPENSCAD_BIN || 'openscad';
+    const timeoutFromEnv = Number.parseInt(process.env.OPENSCAD_COMPILE_TIMEOUT_MS || '', 10);
+    this.compileTimeoutMs = Number.isFinite(timeoutFromEnv) && timeoutFromEnv > 0 ? timeoutFromEnv : 180000;
   }
 
   // 对外编译入口，返回成功状态、产物和耗时信息。
@@ -65,10 +78,49 @@ export class OpenSCADCompiler {
     }
   }
 
-  private async compileWithOpenSCAD(code: string, parameters: Record<string, any>): Promise<Buffer> {
+  async exportArtifact(
+    openscadCode: string,
+    parameters: Record<string, any> = {},
+    format: ArtifactFormat = 'stl'
+  ): Promise<ArtifactResult> {
+    const startTime = Date.now();
+    const normalizedCode = this.normalizeOpenSCADCode(openscadCode);
+
+    try {
+      const validation = await this.validateCode(normalizedCode);
+      if (!validation.valid) {
+        throw new Error(validation.errors.join('; '));
+      }
+
+      const data = await this.compileWithOpenSCAD(normalizedCode, parameters, format);
+
+      return {
+        success: true,
+        data,
+        compileTime: Date.now() - startTime
+      };
+    } catch (error) {
+      const detail: CompileErrorDetail = {
+        message: error instanceof Error ? error.message : '导出失败'
+      };
+
+      return {
+        success: false,
+        error: detail.message,
+        detail,
+        compileTime: Date.now() - startTime
+      };
+    }
+  }
+
+  private async compileWithOpenSCAD(
+    code: string,
+    parameters: Record<string, any>,
+    format: ArtifactFormat = 'stl'
+  ): Promise<Buffer> {
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'scad-generator-'));
     const inputPath = path.join(tempRoot, 'input.scad');
-    const outputPath = path.join(tempRoot, 'output.stl');
+    const outputPath = path.join(tempRoot, `output.${format}`);
 
     try {
       const parameterSource = this.serializeParameters(parameters);
@@ -76,11 +128,11 @@ export class OpenSCADCompiler {
 
       await this.runOpenSCAD(inputPath, outputPath);
 
-      const stlData = await fs.readFile(outputPath);
-      if (!stlData.length) {
-        throw new Error('OpenSCAD 未输出有效 STL 数据');
+      const outputData = await fs.readFile(outputPath);
+      if (!outputData.length) {
+        throw new Error(`OpenSCAD 未输出有效 ${format.toUpperCase()} 数据`);
       }
-      return stlData;
+      return outputData;
     } finally {
       await fs.rm(tempRoot, { recursive: true, force: true });
     }
@@ -101,7 +153,7 @@ export class OpenSCADCompiler {
       let stderr = '';
       const timeout = setTimeout(() => {
         child.kill();
-      }, 60000);
+      }, this.compileTimeoutMs);
 
       child.stdout.on('data', (chunk) => {
         stdout += chunk.toString();
@@ -172,44 +224,17 @@ export class OpenSCADCompiler {
   }
 
   async validateCode(code: string): Promise<{ valid: boolean; errors: string[] }> {
-    const errors: string[] = [];
-    
-    // 基本输入检查。
+    // 放宽前置校验：仅拦截空代码，其余语法交给 OpenSCAD 编译器处理，避免长代码误杀。
     if (!code.trim()) {
-      errors.push('代码为空');
+      return {
+        valid: false,
+        errors: ['代码为空']
+      };
     }
-    
-    // 用栈结构做括号配对检查，快速拦截常见语法错误。
-    const brackets: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
-    const stack: string[] = [];
-    
-    for (const char of code) {
-      if (Object.keys(brackets).includes(char)) {
-        stack.push(brackets[char]);
-      } else if (Object.values(brackets).includes(char)) {
-        const expected = stack.pop();
-        if (expected !== char) {
-          errors.push('括号不匹配');
-          break;
-        }
-      }
-    }
-    
-    if (stack.length > 0) {
-      errors.push('未闭合的括号');
-    }
-    
-    // 检查是否至少包含一个常见 OpenSCAD 几何/布尔函数。
-    const scadFunctions = ['cube', 'sphere', 'cylinder', 'union', 'difference', 'intersection'];
-    const hasValidFunction = scadFunctions.some(func => code.includes(func));
-    
-    if (!hasValidFunction) {
-      errors.push('未找到有效的OpenSCAD几何函数');
-    }
-    
+
     return {
-      valid: errors.length === 0,
-      errors
+      valid: true,
+      errors: []
     };
   }
 

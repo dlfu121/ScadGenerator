@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const backendTarget = process.env.VITE_BACKEND_TARGET || 'http://localhost:5001'
+
 export default defineConfig({
   plugins: [react()],
   root: '.',
@@ -9,7 +11,12 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        target: backendTarget,
+        changeOrigin: true
+      },
+      '/ws': {
+        target: backendTarget,
+        ws: true,
         changeOrigin: true
       }
     }

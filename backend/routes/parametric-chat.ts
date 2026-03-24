@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { generateOpenSCAD } from '../services/ai-service';
+import { generateOpenSCAD, fixOpenSCADCode } from '../services/ai-service';
 import { openscadCompiler } from '../services/openscad-compiler';
+import { emitSessionEvent } from '../services/websocket';
 
 // 前端发起参数化建模请求的最小入参。
 interface ParametricChatRequest {
@@ -14,12 +15,24 @@ interface ParametricChatResponse {
   compilableCode?: string;
   parameters: Record<string, any>;
   sessionId: string;
+  productBrief?: string;
   error?: string;
 }
 
 interface CompileRequestBody {
   openscadCode: string;
   parameters?: Record<string, any>;
+}
+
+interface ExportRequestBody {
+  openscadCode: string;
+  parameters?: Record<string, any>;
+}
+
+interface FixRequestBody {
+  openscadCode: string;
+  compileError?: string;
+  sessionId?: string;
 }
 
 const router = Router();
@@ -39,7 +52,17 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
       } as ParametricChatResponse);
     }
 
-    const result = await generateOpenSCAD(prompt, sessionId);
+    const result = await generateOpenSCAD(prompt, sessionId, (event) => {
+      if (!sessionId) {
+        return;
+      }
+
+      emitSessionEvent(sessionId, {
+        type: 'ai_progress',
+        ...event,
+        timestamp: Date.now(),
+      });
+    });
     
     res.json(result);
   } catch (error) {
@@ -95,6 +118,113 @@ router.post('/compile', async (req: Request<{}, {}, CompileRequestBody>, res: Re
         message: error instanceof Error ? error.message : '编译服务异常'
       }
     });
+  }
+});
+
+router.post('/export/stl', async (req: Request<{}, {}, ExportRequestBody>, res: Response) => {
+  const { openscadCode, parameters = {} } = req.body;
+
+  if (!openscadCode || !openscadCode.trim()) {
+    return res.status(400).json({
+      status: 'error',
+      error: 'OpenSCAD 代码不能为空'
+    });
+  }
+
+  try {
+    const result = await openscadCompiler.exportArtifact(openscadCode, parameters, 'stl');
+
+    if (!result.success || !result.data) {
+      return res.status(422).json({
+        status: 'error',
+        error: result.error || '导出 STL 失败',
+        detail: result.detail,
+        compileTime: result.compileTime
+      });
+    }
+
+    if (typeof result.compileTime === 'number') {
+      res.setHeader('X-Compile-Time', result.compileTime.toString());
+    }
+    res.setHeader('Content-Type', 'model/stl');
+    res.setHeader('Content-Disposition', 'attachment; filename="model.stl"');
+    return res.status(200).send(result.data);
+  } catch (error) {
+    return res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : '导出 STL 服务异常',
+      detail: {
+        message: error instanceof Error ? error.message : '导出 STL 服务异常'
+      }
+    });
+  }
+});
+
+router.post('/export/csg', async (req: Request<{}, {}, ExportRequestBody>, res: Response) => {
+  const { openscadCode, parameters = {} } = req.body;
+
+  if (!openscadCode || !openscadCode.trim()) {
+    return res.status(400).json({
+      status: 'error',
+      error: 'OpenSCAD 代码不能为空'
+    });
+  }
+
+  try {
+    const result = await openscadCompiler.exportArtifact(openscadCode, parameters, 'csg');
+
+    if (!result.success || !result.data) {
+      return res.status(422).json({
+        status: 'error',
+        error: result.error || '导出 CSG 失败',
+        detail: result.detail,
+        compileTime: result.compileTime
+      });
+    }
+
+    if (typeof result.compileTime === 'number') {
+      res.setHeader('X-Compile-Time', result.compileTime.toString());
+    }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="model.csg"');
+    return res.status(200).send(result.data);
+  } catch (error) {
+    return res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : '导出 CSG 服务异常',
+      detail: {
+        message: error instanceof Error ? error.message : '导出 CSG 服务异常'
+      }
+    });
+  }
+});
+
+router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<ParametricChatResponse>) => {
+  try {
+    const { openscadCode, compileError, sessionId } = req.body;
+
+    if (!openscadCode || !openscadCode.trim()) {
+      return res.status(400).json({
+        openscadCode: '',
+        compilableCode: '',
+        parameters: {},
+        sessionId: sessionId || '',
+        error: 'OpenSCAD 代码不能为空'
+      } as ParametricChatResponse);
+    }
+
+    const fixed = await fixOpenSCADCode(openscadCode, compileError, sessionId);
+    return res.json(fixed);
+  } catch (error) {
+    console.error('AI修复错误:', error);
+    const fallback = (error as { fallbackResult?: ParametricChatResponse })?.fallbackResult;
+    return res.status(500).json({
+      openscadCode: fallback?.openscadCode || '',
+      compilableCode: fallback?.compilableCode || fallback?.openscadCode || '',
+      parameters: fallback?.parameters || {},
+      sessionId: fallback?.sessionId || req.body.sessionId || '',
+      error: error instanceof Error ? error.message : '修复失败'
+    } as ParametricChatResponse);
   }
 });
 

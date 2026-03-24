@@ -17,11 +17,20 @@ interface ParameterControlsProps {
   onParameterChange: (parameters: Record<string, any>) => void;
 }
 
-const getSliderConfig = (value: number) => {
-  const abs = Math.max(Math.abs(value), 10);
-  const min = Math.floor(Math.min(0, value - abs));
-  const max = Math.ceil(value + abs);
-  const isInteger = Number.isInteger(value);
+const getSliderConfig = (initialValue: number) => {
+  if (initialValue === 0) {
+    return {
+      min: -1,
+      max: 1,
+      step: 0.1,
+    };
+  }
+
+  const half = initialValue * 0.5;
+  const doubled = initialValue * 2;
+  const min = Math.min(half, doubled);
+  const max = Math.max(half, doubled);
+  const isInteger = Number.isInteger(initialValue);
 
   return {
     min,
@@ -209,6 +218,14 @@ export const ParamPreviewCanvas: React.FC<ParamPreviewCanvasProps> = ({
 };
 
 export const ParameterControls: React.FC<ParameterControlsProps> = ({ parameters, onParameterChange }) => {
+  const initialNumericValuesRef = React.useRef<Record<string, number>>({});
+
+  Object.entries(parameters).forEach(([name, value]) => {
+    if (typeof value === 'number' && Number.isFinite(value) && initialNumericValuesRef.current[name] === undefined) {
+      initialNumericValuesRef.current[name] = value;
+    }
+  });
+
   const handleParameterChange = (paramName: string, value: any) => {
     const newParameters = { ...parameters, [paramName]: value };
     onParameterChange(newParameters);
@@ -220,50 +237,57 @@ export const ParameterControls: React.FC<ParameterControlsProps> = ({ parameters
 
       <div className="parameters-panel">
         {Object.keys(parameters).length === 0 && <p className="empty-tip">暂无可调参数</p>}
-        {Object.entries(parameters).map(([name, value]) => (
-          <div key={name} className="parameter-control">
-            <label>{name}:</label>
-            {typeof value === 'number' ? (
-              <div className="parameter-slider-group">
+        {Object.entries(parameters).map(([name, value]) => {
+          const initialValue = initialNumericValuesRef.current[name];
+          const sliderConfig = typeof value === 'number' && Number.isFinite(initialValue)
+            ? getSliderConfig(initialValue)
+            : null;
+
+          return (
+            <div key={name} className="parameter-control">
+              <label>{name}:</label>
+              {typeof value === 'number' ? (
+                <div className="parameter-slider-group">
+                  <input
+                    type="range"
+                    value={value}
+                    min={sliderConfig?.min ?? value}
+                    max={sliderConfig?.max ?? value}
+                    step={sliderConfig?.step ?? 0.1}
+                    onChange={(e) => {
+                      const newValue = parseFloat(e.target.value);
+                      handleParameterChange(name, Number.isFinite(newValue) ? newValue : 0);
+                    }}
+                    className="parameter-slider"
+                  />
+                  <input
+                    type="number"
+                    value={value}
+                    onChange={(e) => {
+                      const newValue = parseFloat(e.target.value);
+                      handleParameterChange(name, Number.isFinite(newValue) ? newValue : 0);
+                    }}
+                    className="parameter-input parameter-number"
+                  />
+                </div>
+              ) : typeof value === 'boolean' ? (
                 <input
-                  type="range"
-                  value={value}
-                  min={getSliderConfig(value).min}
-                  max={getSliderConfig(value).max}
-                  step={getSliderConfig(value).step}
-                  onChange={(e) => {
-                    const newValue = parseFloat(e.target.value);
-                    handleParameterChange(name, Number.isFinite(newValue) ? newValue : 0);
-                  }}
-                  className="parameter-slider"
+                  type="checkbox"
+                  checked={value}
+                  onChange={(e) => handleParameterChange(name, e.target.checked)}
+                  className="parameter-checkbox"
                 />
+              ) : (
                 <input
-                  type="number"
+                  type="text"
                   value={value}
-                  onChange={(e) => {
-                    const newValue = parseFloat(e.target.value);
-                    handleParameterChange(name, Number.isFinite(newValue) ? newValue : 0);
-                  }}
-                  className="parameter-input parameter-number"
+                  onChange={(e) => handleParameterChange(name, e.target.value)}
+                  className="parameter-input"
                 />
-              </div>
-            ) : typeof value === 'boolean' ? (
-              <input
-                type="checkbox"
-                checked={value}
-                onChange={(e) => handleParameterChange(name, e.target.checked)}
-                className="parameter-checkbox"
-              />
-            ) : (
-              <input
-                type="text"
-                value={value}
-                onChange={(e) => handleParameterChange(name, e.target.value)}
-                className="parameter-input"
-              />
-            )}
-          </div>
-        ))}
+              )}
+            </div>
+          );
+        })}
       </div>
 
       <style>{`

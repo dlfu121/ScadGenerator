@@ -1,5 +1,15 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
 
+const DEFAULT_WS_URL = 'ws://localhost:5001/ws';
+
+function getWebSocketUrl(): string {
+  const envUrl = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
+  if (envUrl) {
+    return envUrl;
+  }
+  return DEFAULT_WS_URL;
+}
+
 export type CompileStatus = 'queued' | 'running' | 'success' | 'error';
 
 // 状态接口定义
@@ -14,6 +24,7 @@ export interface AppState {
   compileStatus: CompileStatus;
   compileProgress: number;
   compileMessage: string;
+  aiProgressTrail: string[];
   compileErrorDetail?: string;
   error?: string;
   history: HistoryItem[];
@@ -38,6 +49,8 @@ export type AppAction =
   | { type: 'SET_COMPILE_STATUS'; payload: CompileStatus }
   | { type: 'SET_COMPILE_PROGRESS'; payload: number }
   | { type: 'SET_COMPILE_MESSAGE'; payload: string }
+  | { type: 'ADD_AI_PROGRESS'; payload: string }
+  | { type: 'CLEAR_AI_PROGRESS' }
   | { type: 'SET_COMPILE_ERROR_DETAIL'; payload?: string }
   | { type: 'SET_ERROR'; payload?: string }
   | { type: 'CLEAR_COMPILE_ERROR' }
@@ -57,6 +70,7 @@ const initialState: AppState = {
   compileStatus: 'queued',
   compileProgress: 0,
   compileMessage: '等待编译',
+  aiProgressTrail: [],
   compileErrorDetail: undefined,
   error: undefined,
   history: []
@@ -91,6 +105,14 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'SET_COMPILE_MESSAGE':
       return { ...state, compileMessage: action.payload };
+
+    case 'ADD_AI_PROGRESS': {
+      const nextTrail = [...state.aiProgressTrail, action.payload].slice(-40);
+      return { ...state, aiProgressTrail: nextTrail };
+    }
+
+    case 'CLEAR_AI_PROGRESS':
+      return { ...state, aiProgressTrail: [] };
 
     case 'SET_COMPILE_ERROR_DETAIL':
       return { ...state, compileErrorDetail: action.payload };
@@ -160,7 +182,7 @@ export const StateProvider: React.FC<StateProviderProps> = ({ children }) => {
     };
 
     const connect = () => {
-      ws = new WebSocket('ws://localhost:5000');
+      ws = new WebSocket(getWebSocketUrl());
 
       ws.onopen = () => {
         console.log('WebSocket连接已建立');
@@ -179,6 +201,13 @@ export const StateProvider: React.FC<StateProviderProps> = ({ children }) => {
           case 'parameters_updated':
             dispatch({ type: 'SET_PARAMETERS', payload: data.parameters });
             break;
+          case 'ai_progress': {
+            const message = typeof data.message === 'string' ? data.message.trim() : '';
+            if (message) {
+              dispatch({ type: 'ADD_AI_PROGRESS', payload: message });
+            }
+            break;
+          }
         }
       };
 

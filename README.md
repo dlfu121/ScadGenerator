@@ -49,13 +49,26 @@ cp .env.example .env
 编辑 `.env`：
 
 ```env
-# 七牛 DeepSeek 网关（或其他兼容 OpenAI 的服务）
-QINIU_DEEPSEEK_API_KEY=your_api_key_here
-QINIU_DEEPSEEK_BASE_URL=https://api.qnaigc.com/v1
-QINIU_DEEPSEEK_MODEL=deepseek-r1
+# 新增智能体：Anthropic Messages 风格接口
+QN_API_KEY=your_api_key_here
+QN_BASE_URL=https://api.qnaigc.com/v1
+OPENSCAD_MODEL=claude-4.1-opus
+OPENSCAD_API_PROTOCOL=anthropic-messages
+OPENSCAD_API_PATH=/messages
+OPENSCAD_MAX_TOKENS=1024
 
 # 后端监听端口（默认 5000）
 PORT=5000
+```
+
+当 `OPENSCAD_API_PROTOCOL=anthropic-messages` 时，后端将按以下结构请求：
+
+```json
+{
+  "model": "claude-4.1-opus",
+  "messages": [{"role": "user", "content": [{"type": "text", "text": "..."}]}],
+  "max_tokens": 1024
+}
 ```
 
 > **注意**：`.env` 文件已被 `.gitignore` 排除，不会提交到版本库。
@@ -99,6 +112,33 @@ npm run dev
 ```
 
 点击生成，AI 将返回 OpenSCAD 代码并在右侧实时渲染 3D 预览。
+
+## 环境变量配置
+
+在运行本项目之前，请确保正确配置以下环境变量：
+
+| 环境变量名称            | 描述                                   | 默认值               |
+|-------------------------|--------------------------------------|---------------------|
+| `PORT`                 | 后端服务监听的端口号                   | `5001`              |
+| `JSON_BODY_LIMIT`       | 后端服务允许的最大请求体大小            | `5mb`               |
+| `VITE_BACKEND_TARGET`   | 前端代理的后端服务地址                 | `http://localhost:5001` |
+| `OPENSCAD_BIN`          | OpenSCAD 可执行文件路径                | `openscad`          |
+| `OPENSCAD_COMPILE_TIMEOUT_MS` | OpenSCAD 编译超时时间（毫秒）         | `30000`             |
+
+### 配置方法
+
+1. 在项目根目录下创建一个 `.env` 文件。
+2. 根据需要添加上述环境变量及其值，例如：
+
+```env
+PORT=5001
+JSON_BODY_LIMIT=5mb
+VITE_BACKEND_TARGET=http://localhost:5001
+OPENSCAD_BIN=openscad
+OPENSCAD_COMPILE_TIMEOUT_MS=30000
+```
+
+3. 保存文件后，重新启动项目以加载新的环境变量配置。
 
 ## 项目结构
 
@@ -192,7 +232,10 @@ pip install -r requirements.txt
 ```env
 QN_API_KEY=your_api_key_here
 QN_BASE_URL=https://api.qnaigc.com/v1
-OPENSCAD_MODEL=deepseek-r1
+OPENSCAD_MODEL=claude-4.1-opus
+OPENSCAD_API_PROTOCOL=anthropic-messages
+OPENSCAD_API_PATH=/messages
+OPENSCAD_MAX_TOKENS=1024
 ```
 
 运行：
@@ -255,3 +298,51 @@ A: 修改 `.env` 的 `PORT` 值并同步更新 `app/vite.config.ts` 中的 proxy
 ## 许可证
 
 MIT License
+
+## 更新检查说明（2026-03-24）
+
+### 检查范围
+
+- 后端：`backend/server`、`backend/routes`、`backend/services`
+- 前端：`app/src/App.tsx`、`app/src/hooks/useScadWorkflow.ts`、`app/src/modules/state-session/StateSession.tsx`、`app/src/modules/prompt-input/PromptInput.tsx`、`app/src/modules/param-preview/ParamPreview.tsx`
+- 配置与文档：`.env.example`、`README.md`、`requirement.md`
+
+### 变更摘要
+
+1. 交互可视化增强
+- 左侧改为会话式消息区。
+- 生成过程支持阶段日志（排队/生成/编译/完成）展示。
+- 右侧模型工作区支持“预览 / SCAD代码 / 参数控制 / CSG树”切换。
+
+2. 后端能力扩展
+- `/api/parametric-chat` 增加 `ai_progress` 实时进度事件。
+- 新增 `/fix`、`/export/stl`、`/export/csg`。
+- OpenSCAD 编译器支持多产物导出和可配置超时。
+
+3. 参数与代码处理优化
+- `code-processor` 参数提取增强（类型/范围/分组/选项）。
+- 语法校验从逐行检查调整为全局括号平衡，降低误报。
+
+### 风险与建议（按优先级）
+
+1. P0 安全风险
+- 发现 `.env` 中存在真实密钥（如 `QN_API_KEY`、`CLAUDE_API_KEY`）。
+- 建议立即轮换密钥，并确保 `.env` 不进入版本控制历史；建议增加密钥扫描（如 gitleaks）。
+
+2. P1 功能风险
+- `app/src/modules/ai-generate-client/ai.py` 中对 `CLAUDE_API_KEY` 的校验应改为仅在 `claude-4.5-sonnet` 路径触发，避免影响默认 `openscad-generator`。
+
+3. P1 配置一致性
+- 文档中仍有部分端口示例为 `5000`，而后端默认已切到 `5001`。
+- 建议统一文档与示例变量（尤其是 `PORT`、`VITE_BACKEND_TARGET`、`VITE_WS_URL`）。
+
+4. P2 文档可读性
+- `requirement.md` 存在个别编号/语句断裂，建议统一修订。
+
+### 最小回归测试清单
+
+1. 生成链路：输入需求 -> 返回代码 -> 自动编译 -> 预览可见。
+2. 对话可视化：生成期间左侧阶段日志持续更新。
+3. 工作区切换：预览/代码/参数控制/CSG树视图切换正常。
+4. 导出能力：STL 下载、CSG 查看均可用。
+5. 修复链路：错误代码可通过自动修复恢复并再次编译。

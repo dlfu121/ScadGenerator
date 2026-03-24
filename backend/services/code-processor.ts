@@ -4,12 +4,31 @@ export interface ProcessedCode {
   errors: string[];
 }
 
-// 参数抽象：供前端动态渲染参数面板。
+export interface ParameterRange {
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+export interface ParameterOption {
+  value: string | number;
+  label?: string;
+}
+
+export type ParameterType =
+  | 'number' | 'string' | 'boolean'
+  | 'number[]' | 'string[]' | 'boolean[]';
+
 export interface Parameter {
   name: string;
-  type: 'number' | 'string' | 'boolean';
-  value: any;
+  displayName: string;
+  type: ParameterType;
+  value: number | string | boolean | number[] | string[] | boolean[];
+  defaultValue: number | string | boolean | number[] | string[] | boolean[];
   description?: string;
+  group: string;
+  range: ParameterRange;
+  options: ParameterOption[];
 }
 
 // 代码后处理总入口：清洗、提参、基础校验。
@@ -18,11 +37,9 @@ export function processOpenSCADCode(rawCode: string): ProcessedCode {
   const normalized = normalizeModelOutput(rawCode);
   const cleanedCode = extractOpenSCADCandidate(normalized);
 
-  // 从 `name = value;` 风格语句中提取参数。
-  const parameters = extractParameters(cleanedCode);
-  
-  // 做基础语法健壮性检查（括号/方括号/花括号配对）。
-  const syntaxErrors = validateSyntax(cleanedCode);
+  const parameters = extractParameters(cleanedCode || normalized);
+
+  const syntaxErrors = validateSyntax(cleanedCode || normalized);
   errors.push(...syntaxErrors);
 
   return {
@@ -32,187 +49,225 @@ export function processOpenSCADCode(rawCode: string): ProcessedCode {
   };
 }
 
+// 只去 <think> 标签；保留 /* */ 块注释（Customizer 分组标记）。
 function normalizeModelOutput(rawCode: string): string {
   return rawCode
     .replace(/\r\n?/g, '\n')
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/think>/gi, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '\n')
     .trim();
 }
 
+function scoreOpenSCADCode(code: string): number {
+  if (!code || code.length < 20) return 0;
+  let score = 0;
+  const patterns = [
+    /\b(cube|sphere|cylinder|polyhedron)\s*\(/gi,
+    /\b(union|difference|intersection)\s*\(\s*\)/gi,
+    /\b(translate|rotate|scale|mirror)\s*\(/gi,
+    /\b(linear_extrude|rotate_extrude)\s*\(/gi,
+    /\b(module|function)\s+\w+\s*\(/gi,
+    /\$fn\s*=/gi,
+    /\bfor\s*\(\s*\w+\s*=\s*\[/gi,
+    /;\s*$/gm,
+    /\/\/.*$/gm,
+  ];
+  for (const pattern of patterns) {
+    score += (code.match(pattern) || []).length;
+  }
+  const varDecls = code.match(/^\s*\w+\s*=\s*[^;]+;/gm);
+  if (varDecls) score += Math.min(varDecls.length, 5);
+  return score;
+}
+
+// 从模型输出中提取最优 OpenSCAD 代码候选。
+// 有 fence：遍历所有块，取 score 最高的；无 fence：整段得分 >= 5 才接受。
 function extractOpenSCADCandidate(normalized: string): string {
-  if (!normalized) {
-    return '';
-  }
+  if (!normalized) return '';
 
-  const fencedBlocks = [...normalized.matchAll(/```(?:openscad|scad)?\s*([\s\S]*?)```/gi)]
-    .map((match) => match[1].trim())
-    .filter(Boolean);
+  const fenceRegex = /```(?:openscad|scad)?\s*\n?([\s\S]*?)\n?```/gi;
+  let match: RegExpExecArray | null;
+  let bestCode = '';
+  let bestScore = 0;
 
-  const candidateSource = fencedBlocks.length > 0
-    ? fencedBlocks[fencedBlocks.length - 1]
-    : normalized;
-
-  const lines = candidateSource
-    .split('\n')
-    .map((line) => stripInlineNoise(line))
-    .filter((line) => line.trim() !== '');
-
-  if (fencedBlocks.length > 0) {
-    return lines.join('\n').trim();
-  }
-
-  const firstCodeLine = lines.findIndex((line) => isLikelyOpenSCADLine(line));
-  if (firstCodeLine === -1) {
-    return lines.join('\n').trim();
-  }
-
-  let lastCodeLine = firstCodeLine;
-  for (let index = firstCodeLine; index < lines.length; index += 1) {
-    if (isLikelyOpenSCADLine(lines[index]) || isStructuralContinuationLine(lines[index])) {
-      lastCodeLine = index;
+  while ((match = fenceRegex.exec(normalized)) !== null) {
+    const code = match[1].trim();
+    const score = scoreOpenSCADCode(code);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCode = code;
     }
   }
 
-  return lines
-    .slice(firstCodeLine, lastCodeLine + 1)
-    .filter((line) => isLikelyOpenSCADLine(line) || isStructuralContinuationLine(line))
-    .join('\n')
-    .trim();
+  if (bestCode && bestScore >= 3) return bestCode;
+
+  const rawScore = scoreOpenSCADCode(normalized);
+  if (rawScore >= 5) return normalized.trim();
+
+  return '';
 }
 
-function stripInlineNoise(line: string): string {
-  return line
-    .replace(/^```(?:openscad|scad)?\s*/i, '')
-    .replace(/```$/i, '')
-    .replace(/^\s*\/\*+\s*$/, '')
-    .replace(/^\s*\*\/\s*$/, '')
-    .replace(/\s*\/\/.*$/, '')
-    .trimRight();
-}
-
-function isLikelyOpenSCADLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  return /^(module|function|for|if|else|let|each)\b/.test(trimmed)
-    || /^[A-Za-z_]\w*\s*=/.test(trimmed)
-    || /^(cube|sphere|cylinder|polyhedron|polygon|circle|square|text|translate|rotate|scale|mirror|resize|color|offset|minkowski|hull|union|difference|intersection|linear_extrude|rotate_extrude|projection|multmatrix|surface|import|render|echo)\b/.test(trimmed)
-    || /^[{}]$/.test(trimmed)
-    || /[;{}]$/.test(trimmed);
-}
-
-function isStructuralContinuationLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return false;
-  }
-
-  return /^[\[\]{}(),.+\-*/\d\s]+,?$/.test(trimmed);
-}
-
-function extractParameters(code: string): Parameter[] {
-  const parameters: Parameter[] = [];
-  const lines = code.split('\n');
-  
-  lines.forEach(line => {
-    // 匹配参数定义：name = value;
-    const match = line.match(/^(\w+)\s*=\s*(.+);?\s*$/);
-    if (match) {
-      const [, name, valueStr] = match;
-      
-      try {
-        const value = parseValue(valueStr);
-        const type = getValueType(value);
-        
-        parameters.push({
-          name,
-          type,
-          value,
-          description: `参数 ${name}`
-        });
-      } catch (error) {
-        // 无法解析的赋值表达式直接跳过，不阻塞整体处理。
-      }
-    }
-  });
-  
-  return parameters;
-}
-
-function parseValue(valueStr: string): any {
-  valueStr = valueStr.trim();
-  
-  // 移除末尾的分号
-  if (valueStr.endsWith(';')) {
-    valueStr = valueStr.slice(0, -1);
-  }
-  
-  // 数字
-  if (/^-?\d*\.?\d+$/.test(valueStr)) {
-    return parseFloat(valueStr);
-  }
-  
-  // 布尔值
-  if (valueStr === 'true') return true;
-  if (valueStr === 'false') return false;
-  
-  // 字符串
-  if (valueStr.startsWith('"') && valueStr.endsWith('"')) {
-    return valueStr.slice(1, -1);
-  }
-  
-  // 数组
-  if (valueStr.startsWith('[') && valueStr.endsWith(']')) {
-    try {
-      return JSON.parse(valueStr.replace(/(\w+)\s*:/g, '"$1":'));
-    } catch {
-      return valueStr;
-    }
-  }
-  
-  // 复杂表达式先按字符串保留，交给 OpenSCAD 在运行时解释。
-  return valueStr;
-}
-
-function getValueType(value: any): 'number' | 'string' | 'boolean' {
-  if (typeof value === 'number') return 'number';
-  if (typeof value === 'boolean') return 'boolean';
-  return 'string';
-}
-
-// 轻量语法校验：逐行检查常见括号配对问题。
+// 全局括号平衡校验，避免单行 translate([10,0,0]) 触发假报错。
 function validateSyntax(code: string): string[] {
   const errors: string[] = [];
-  const lines = code.split('\n');
-  
-  lines.forEach((line, index) => {
-    const trimmed = line.trim();
-    
-    // 检查未闭合的括号
-    const openBrackets = (trimmed.match(/\(/g) || []).length;
-    const closeBrackets = (trimmed.match(/\)/g) || []).length;
-    if (openBrackets !== closeBrackets) {
-      errors.push(`第 ${index + 1} 行: 括号不匹配`);
-    }
-    
-    // 检查未闭合的方括号
-    const openSquare = (trimmed.match(/\[/g) || []).length;
-    const closeSquare = (trimmed.match(/\]/g) || []).length;
-    if (openSquare !== closeSquare) {
-      errors.push(`第 ${index + 1} 行: 方括号不匹配`);
-    }
-    
-    // 检查未闭合的花括号
-    const openBrace = (trimmed.match(/\{/g) || []).length;
-    const closeBrace = (trimmed.match(/\}/g) || []).length;
-    if (openBrace !== closeBrace) {
-      errors.push(`第 ${index + 1} 行: 花括号不匹配`);
+  const stripped = code.replace(/"[^"]*"/g, '""');
+  let round = 0, square = 0, curly = 0;
+  for (const ch of stripped) {
+    if (ch === '(') round++;
+    else if (ch === ')') round--;
+    else if (ch === '[') square++;
+    else if (ch === ']') square--;
+    else if (ch === '{') curly++;
+    else if (ch === '}') curly--;
+  }
+  if (round !== 0)  errors.push('括号 () 全局不匹配');
+  if (square !== 0) errors.push('方括号 [] 全局不匹配');
+  if (curly !== 0)  errors.push('花括号 {} 全局不匹配');
+  return errors;
+}
+
+// 照抄 CADAM parseParameters 完整逻辑。
+function extractParameters(code: string): Parameter[] {
+  // 只解析顶部（截至第一个 module/function 关键词前）
+  const script = code.split(/^(module |function )/m)[0];
+
+  const parameters: Record<string, Parameter> = {};
+  const parameterRegex =
+    /^([a-z0-9A-Z_$]+)\s*=\s*([^;]+);[\t\f\cK ]*(\/\/[^\n]*)?/gm;
+  const groupRegex = /^\/\*\s*\[([^\]]+)\]\s*\*\//gm;
+
+  // 分组扫描
+  const groupSections: { id: string; group: string; code: string }[] = [
+    { id: '', group: '', code: script },
+  ];
+  let tmpGroup;
+  while ((tmpGroup = groupRegex.exec(script))) {
+    groupSections.push({
+      id: tmpGroup[0],
+      group: tmpGroup[1].trim(),
+      code: '',
+    });
+  }
+
+  groupSections.forEach((group, index) => {
+    const nextGroup = groupSections[index + 1];
+    const startIndex = group.id ? script.indexOf(group.id) : 0;
+    const endIndex = nextGroup ? script.indexOf(nextGroup.id) : script.length;
+    group.code = script.substring(startIndex, endIndex);
+  });
+
+  if (groupSections.length > 1) {
+    groupSections[0].code = script.substring(0, script.indexOf(groupSections[1].id));
+  }
+
+  groupSections.forEach((groupSection) => {
+    let match;
+    while ((match = parameterRegex.exec(groupSection.code)) !== null) {
+      const name = match[1];
+      const value = match[2].trim();
+
+      // 跳过变量引用（右值以字母开头且非 true/false）或多行
+      if (
+        value !== 'true' &&
+        value !== 'false' &&
+        (value.match(/^[a-zA-Z_]/) || value.split('\n').length > 1)
+      ) {
+        continue;
+      }
+
+      let typeAndValue: { value: Parameter['value']; type: ParameterType } | undefined;
+      try {
+        typeAndValue = convertType(value);
+      } catch {
+        continue;
+      }
+      if (!typeAndValue) continue;
+
+      let description: Parameter['description'] = undefined;
+      let options: ParameterOption[] = [];
+      let range: ParameterRange = {};
+
+      // 行尾注释元数据
+      if (match[3]) {
+        const rawComment = match[3].replace(/^\/\/\s*/, '').trim();
+        const cleaned = rawComment.replace(/^\[+|\]+$/g, '');
+
+        if (!isNaN(Number(rawComment))) {
+          if (typeAndValue.type === 'string') {
+            range = { max: parseFloat(cleaned) };
+          } else {
+            range = { step: parseFloat(cleaned) };
+          }
+        } else if (rawComment.startsWith('[') && cleaned.includes(',')) {
+          options = cleaned.trim().split(',').map((option) => {
+            const parts = option.trim().split(':');
+            let optVal: ParameterOption['value'] = parts[0];
+            const label: ParameterOption['label'] = parts[1];
+            if (typeAndValue!.type === 'number') optVal = parseFloat(String(optVal));
+            return { value: optVal, label };
+          });
+        } else if (cleaned.match(/([0-9]+:?)+/)) {
+          const [min, maxOrStep, max] = cleaned.trim().split(':');
+          if (min && (maxOrStep || max)) range = { min: parseFloat(min) };
+          if (max || maxOrStep || min) range = { ...range, max: parseFloat(max || maxOrStep || min) };
+          if (max && maxOrStep) range = { ...range, step: parseFloat(maxOrStep) };
+        }
+      }
+
+      // 上方行注释 → description
+      let above = script.split(new RegExp(`^${escapeRegExp(match[0])}`, 'gm'))[0];
+      if (above.endsWith('\n')) above = above.slice(0, -1);
+      const lastLine = above.split('\n').reverse()[0];
+      if (lastLine && lastLine.trim().startsWith('//')) {
+        const desc = lastLine.replace(/^\/\/\/*\s*/, '');
+        if (desc.length > 0) description = desc;
+      }
+
+      let displayName = name
+        .replace(/_/g, ' ')
+        .split(' ')
+        .map((w) => w[0].toUpperCase() + w.slice(1))
+        .join(' ');
+      if (name === '$fn') displayName = 'Resolution';
+
+      parameters[name] = {
+        description,
+        group: groupSection.group,
+        name,
+        displayName,
+        defaultValue: typeAndValue.value,
+        range,
+        options,
+        ...typeAndValue,
+      };
     }
   });
-  
-  return errors;
+
+  return Object.values(parameters);
+}
+
+function convertType(rawValue: string): { value: Parameter['value']; type: ParameterType } {
+  if (/^-?\d+(\.\d+)?$/.test(rawValue)) {
+    return { value: parseFloat(rawValue), type: 'number' };
+  } else if (rawValue === 'true' || rawValue === 'false') {
+    return { value: rawValue === 'true', type: 'boolean' };
+  } else if (/^".*"$/.test(rawValue)) {
+    return { value: rawValue.replace(/^"(.*)"$/, '$1'), type: 'string' };
+  } else if (rawValue.startsWith('[') && rawValue.endsWith(']')) {
+    const items = rawValue.slice(1, -1).split(',').map((s) => s.trim());
+    if (items.length > 0 && items.every((i) => /^-?\d+(\.\d+)?$/.test(i))) {
+      return { value: items.map(parseFloat), type: 'number[]' };
+    } else if (items.length > 0 && items.every((i) => /^".*"$/.test(i))) {
+      return { value: items.map((i) => i.slice(1, -1)), type: 'string[]' };
+    } else if (items.length > 0 && items.every((i) => i === 'true' || i === 'false')) {
+      return { value: items.map((i) => i === 'true'), type: 'boolean[]' };
+    }
+    throw new Error(`Invalid array value: ${rawValue}`);
+  } else {
+    throw new Error(`Invalid value: ${rawValue}`);
+  }
+}
+
+function escapeRegExp(string: string): string {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

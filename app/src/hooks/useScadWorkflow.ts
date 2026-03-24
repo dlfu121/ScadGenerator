@@ -9,6 +9,17 @@ interface UseScadWorkflowOptions {
   dispatch: AppDispatch;
 }
 
+interface CSGTreeResult {
+  success: boolean;
+  text?: string;
+  error?: string;
+}
+
+export interface GenerateChatResult {
+  success: boolean;
+  fullResponse: string;
+}
+
 function parseScalarValue(rawValue: string): string | number | boolean {
   const normalized = rawValue.trim();
 
@@ -107,6 +118,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     dispatch({ type: 'SET_COMPILE_STATUS', payload: 'queued' });
     dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 10 });
     dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '已进入编译队列' });
+    dispatch({ type: 'ADD_AI_PROGRESS', payload: '已进入编译队列' });
     dispatch({ type: 'SET_COMPILE_ERROR_DETAIL', payload: undefined });
     dispatch({ type: 'SET_LOADING', payload: true });
     dispatch({ type: 'SET_ERROR', payload: undefined });
@@ -115,6 +127,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
       dispatch({ type: 'SET_COMPILE_STATUS', payload: 'running' });
       dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 35 });
       dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '正在调用 OpenSCAD 编译' });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '正在调用 OpenSCAD 编译' });
 
       const response = await fetch('/api/parametric-chat/compile', {
         method: 'POST',
@@ -137,6 +150,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
 
       dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 75 });
       dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '已返回 STL，正在加载渲染' });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '已返回 STL，正在加载渲染' });
       const stlBuffer = await response.arrayBuffer();
 
       if (requestId !== compileSeqRef.current || controller.signal.aborted) {
@@ -147,6 +161,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
       dispatch({ type: 'SET_COMPILE_STATUS', payload: 'success' });
       dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 100 });
       dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '编译完成' });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '编译完成，模型预览已更新' });
     } catch (error) {
       if (controller.signal.aborted || requestId !== compileSeqRef.current) {
         return;
@@ -154,6 +169,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
       dispatch({ type: 'SET_COMPILE_STATUS', payload: 'error' });
       dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 0 });
       dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '编译失败' });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '编译失败，请检查代码或点击自动修复' });
       dispatch({ type: 'SET_COMPILE_ERROR_DETAIL', payload: error instanceof Error ? error.message : '未知错误' });
       dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '未知错误' });
     } finally {
@@ -163,7 +179,9 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     }
   }, [dispatch]);
 
-  const handleGenerate = useCallback(async (prompt: string) => {
+  const handleGenerate = useCallback(async (prompt: string): Promise<GenerateChatResult> => {
+    dispatch({ type: 'CLEAR_AI_PROGRESS' });
+    dispatch({ type: 'ADD_AI_PROGRESS', payload: '请求已发送，正在连接模型服务' });
     dispatch({ type: 'SET_PROMPT', payload: prompt });
     dispatch({ type: 'SET_LOADING', payload: true });
     dispatch({ type: 'SET_ERROR', payload: undefined });
@@ -196,13 +214,43 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
         throw new Error(result?.error || '生成失败');
       }
 
+      if (typeof result?.productBrief === 'string' && result.productBrief.trim()) {
+        dispatch({ type: 'ADD_AI_PROGRESS', payload: '推理摘要已完成，正在整理可编译代码' });
+      }
+
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '代码生成完成，准备编译预览' });
+
       await compileModel(result.compilableCode || result.openscadCode, result.parameters);
+
+      const productBrief = typeof result?.productBrief === 'string' ? result.productBrief.trim() : '';
+      const generatedCode = typeof result?.openscadCode === 'string' ? result.openscadCode.trim() : '';
+      const fullResponse = productBrief
+        ? [
+          '产品经理方案：',
+          productBrief,
+          '',
+          '模型生成的 OpenSCAD 代码：',
+          generatedCode || '（未返回代码）',
+        ].join('\n')
+        : (generatedCode || '模型生成成功，但未返回可展示文本。');
+
+      return {
+        success: true,
+        fullResponse,
+      };
     } catch (error) {
+      const errorText = error instanceof Error ? error.message : '未知错误';
       dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '未知错误' });
       dispatch({ type: 'SET_COMPILE_STATUS', payload: 'error' });
       dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 0 });
       dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '生成失败' });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: `生成失败：${errorText}` });
       dispatch({ type: 'SET_LOADING', payload: false });
+
+      return {
+        success: false,
+        fullResponse: errorText,
+      };
     }
   }, [compileModel, dispatch, state.sessionId]);
 
@@ -276,12 +324,160 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     await compileModel(state.openscadCode, state.parameters);
   }, [compileModel, state.openscadCode, state.parameters]);
 
-  const handleFix = useCallback(() => {
-    dispatch({ type: 'SET_ERROR', payload: '一键修复已预留，下一阶段接入 AI 自动修复。' });
-  }, [dispatch]);
+  const handleFix = useCallback(async () => {
+    const currentCode = stateRef.current.openscadCode;
+    if (!currentCode.trim()) {
+      dispatch({ type: 'SET_ERROR', payload: '当前没有可修复的 OpenSCAD 代码。' });
+      return;
+    }
+
+    dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: 'SET_ERROR', payload: undefined });
+    dispatch({ type: 'SET_COMPILE_MESSAGE', payload: 'AI 正在修复代码' });
+
+    try {
+      const response = await fetch('/api/parametric-chat/fix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          openscadCode: currentCode,
+          compileError: stateRef.current.compileErrorDetail || stateRef.current.error,
+          sessionId: stateRef.current.sessionId,
+        }),
+      });
+
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(result?.error || '自动修复失败');
+      }
+
+      const fixedCode = typeof result?.openscadCode === 'string' ? result.openscadCode : '';
+      if (!fixedCode.trim()) {
+        throw new Error('自动修复未返回有效代码');
+      }
+
+      dispatch({ type: 'SET_OPENSCAD_CODE', payload: fixedCode });
+
+      if (result && Object.prototype.hasOwnProperty.call(result, 'parameters') && typeof result.parameters === 'object') {
+        dispatch({ type: 'SET_PARAMETERS', payload: result.parameters });
+      }
+
+      if (result?.sessionId) {
+        dispatch({ type: 'SET_SESSION_ID', payload: result.sessionId });
+      }
+
+      const parametersForCompile = result?.parameters && typeof result.parameters === 'object'
+        ? result.parameters
+        : stateRef.current.parameters;
+
+      await compileModel(result.compilableCode || fixedCode, parametersForCompile);
+    } catch (error) {
+      dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '自动修复失败' });
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  }, [compileModel, dispatch]);
 
   const handleCloseError = useCallback(() => {
     dispatch({ type: 'CLEAR_COMPILE_ERROR' });
+  }, [dispatch]);
+
+  const downloadBlob = useCallback((data: BlobPart, contentType: string, fileName: string) => {
+    const blob = new Blob([data], { type: contentType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, []);
+
+  const handleExportSTL = useCallback(async () => {
+    const currentCode = stateRef.current.openscadCode;
+    if (!currentCode.trim()) {
+      dispatch({ type: 'SET_ERROR', payload: '当前没有可导出的 OpenSCAD 代码。' });
+      return;
+    }
+
+    dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: 'SET_ERROR', payload: undefined });
+    dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '正在导出 STL 文件' });
+
+    try {
+      const response = await fetch('/api/parametric-chat/export/stl', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          openscadCode: currentCode,
+          parameters: stateRef.current.parameters,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({ error: '导出 STL 失败' }));
+        throw new Error(errorPayload.error || '导出 STL 失败');
+      }
+
+      const stlBuffer = await response.arrayBuffer();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      downloadBlob(stlBuffer, 'model/stl', `model-${timestamp}.stl`);
+      dispatch({ type: 'SET_COMPILE_MESSAGE', payload: 'STL 导出完成' });
+    } catch (error) {
+      dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '导出 STL 失败' });
+      dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '导出 STL 失败' });
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
+  }, [dispatch, downloadBlob]);
+
+  const handleViewCSGTree = useCallback(async (): Promise<CSGTreeResult> => {
+    const currentCode = stateRef.current.openscadCode;
+    if (!currentCode.trim()) {
+      const message = '当前没有可展示的 OpenSCAD 代码。';
+      dispatch({ type: 'SET_ERROR', payload: message });
+      return { success: false, error: message };
+    }
+
+    dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: 'SET_ERROR', payload: undefined });
+    dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '正在生成 CSG 树' });
+
+    try {
+      const response = await fetch('/api/parametric-chat/export/csg', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          openscadCode: currentCode,
+          parameters: stateRef.current.parameters,
+        }),
+      });
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error('CSG 树接口不存在（404）。请重启后端服务并确认已运行最新代码。');
+        }
+        const errorPayload = await response.json().catch(() => ({ error: '获取 CSG 树失败' }));
+        const errorText = errorPayload.error || '获取 CSG 树失败';
+        throw new Error(errorText);
+      }
+
+      const csgText = await response.text();
+      if (!csgText.trim()) {
+        throw new Error('OpenSCAD 返回了空的 CSG 内容，请检查模型或 OpenSCAD 版本是否支持 CSG 导出。');
+      }
+
+      dispatch({ type: 'SET_COMPILE_MESSAGE', payload: 'CSG 树已更新' });
+      return { success: true, text: csgText };
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : '获取 CSG 树失败';
+      dispatch({ type: 'SET_ERROR', payload: errorText });
+      dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '获取 CSG 树失败' });
+      return { success: false, error: errorText };
+    } finally {
+      dispatch({ type: 'SET_LOADING', payload: false });
+    }
   }, [dispatch]);
 
   return {
@@ -292,5 +488,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     handleRetry,
     handleFix,
     handleCloseError,
+    handleExportSTL,
+    handleViewCSGTree,
   };
 }
