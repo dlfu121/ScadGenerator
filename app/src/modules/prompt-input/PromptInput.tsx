@@ -20,6 +20,15 @@ interface ConversationMessage {
   content: string;
 }
 
+interface RequirementConfirmResult {
+  pmResponse?: string;
+  isNeedMoreInfo?: boolean;
+  isClear?: boolean;
+  shouldGenerate?: boolean;
+  confirmedRequirement?: string;
+  error?: string;
+}
+
 const EXAMPLE_PROMPTS = [
   '创建一个参数化的圆柱体，半径10mm，高度50mm',
   '设计一个带孔的立方体，边长40mm，孔径8mm',
@@ -40,7 +49,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
   const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([]);
   const [isRequirementConfirmed, setIsRequirementConfirmed] = useState(false);
   const [isConfirmingMode, setIsConfirmingMode] = useState(false);
-  const [initialPrompt, setInitialPrompt] = useState('');
+  const [confirmedRequirement, setConfirmedRequirement] = useState('');
   
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const pendingMessageIdRef = useRef<string | null>(null);
@@ -119,7 +128,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         }),
       });
 
-      const result = await response.json();
+      const result = await response.json() as RequirementConfirmResult;
 
       if (!response.ok) {
         throw new Error(result?.error || '对话失败');
@@ -143,18 +152,27 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
       // 更新对话历史
       setConversationHistory((prev) => [
         ...prev,
-        { role: 'assistant', content: result.pmResponse },
+        { role: 'assistant', content: result.pmResponse || '' },
       ]);
 
-      // 如果确认完成，标记状态并自动进入代码生成
+      if (result.confirmedRequirement && result.confirmedRequirement.trim()) {
+        setConfirmedRequirement(result.confirmedRequirement.trim());
+      }
+
+      // 需求确认完成后进入“待生成”状态，但不自动生成。
       if (hasConfirmationMarker || result.isClear) {
         setIsRequirementConfirmed(true);
+      }
+
+      // 只有当 Kimi 明确发出“请Claude生成代码”信号时，才调用 Claude 生成。
+      if (result.shouldGenerate) {
         setIsConfirmingMode(false);
-        
-        // 稍微延迟后自动调用生成
+        const generationPrompt = (result.confirmedRequirement && result.confirmedRequirement.trim())
+          ? result.confirmedRequirement.trim()
+          : buildRequirementSummary(newConversationHistory, result.pmResponse || '');
         setTimeout(() => {
-          void handleGenerateAfterConfirmation();
-        }, 800);
+          void handleGenerateAfterConfirmation(generationPrompt);
+        }, 300);
       }
 
       pendingMessageIdRef.current = null;
@@ -173,8 +191,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
   };
 
   // 需求确认完成后进行代码生成
-  const handleGenerateAfterConfirmation = async () => {
-    const generateResult = await onGenerate(initialPrompt);
+  const handleGenerateAfterConfirmation = async (generationPrompt: string) => {
+    const generateResult = await onGenerate(generationPrompt);
     setMessages((prev) => [
       ...prev,
       {
@@ -195,30 +213,13 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
       return;
     }
 
-    // 如果已确认需求，继续生成流程
-    if (isRequirementConfirmed) {
-      const generateResult = await onGenerate(initialPrompt);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `${Date.now()}_generate_complete`,
-          role: 'assistant',
-          content: generateResult.fullResponse || (generateResult.success ? '✅ 模型生成完成！' : '❌ 模型生成失败，请重试。'),
-          timestamp: makeTimestamp(),
-          type: 'text',
-        },
-      ]);
-      return;
-    }
-
-    // 如果还在确认模式，继续对话
-    if (isConfirmingMode) {
+    // 已进入对话确认阶段（含“需求已确认但等待生成指令”）时，继续走 Kimi 对话。
+    if (isConfirmingMode || isRequirementConfirmed) {
       await handleConfirmationChat(promptText);
       return;
     }
 
     // 首次输入，进入确认模式
-    setInitialPrompt(promptText);
     setIsConfirmingMode(true);
     setPrompt('');
     
@@ -247,7 +248,20 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
     setConversationHistory([]);
     setIsRequirementConfirmed(false);
     setIsConfirmingMode(false);
-    setInitialPrompt('');
+    setConfirmedRequirement('');
+  };
+
+  const buildRequirementSummary = (history: ConversationMessage[], latestAssistantMessage: string): string => {
+    const historyText = history
+      .map((msg) => `${msg.role === 'user' ? '用户' : '助手'}: ${msg.content}`)
+      .join('\n');
+
+    return [
+      '以下是已确认的需求对话，请仅基于这些内容生成 OpenSCAD 代码：',
+      historyText,
+      latestAssistantMessage ? `\n助手最新回复：\n${latestAssistantMessage}` : '',
+      confirmedRequirement ? `\n已提取最终需求：\n${confirmedRequirement}` : '',
+    ].join('\n');
   };
 
   return (
@@ -257,7 +271,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         <div className="header-title">
           <h3>🤖 模型生成助手</h3>
           <p>
-            {isConfirmingMode ? '💬 需求确认中...' : '描述你的想法，我会帮你生成 OpenSCAD 代码'}
+            {isConfirmingMode || isRequirementConfirmed
+              ? '💬 需求确认中（说“生成代码”后由 Claude 出码）'
+              : '描述你的想法，我会帮你生成 OpenSCAD 代码'}
           </p>
         </div>
         <div className="header-actions">
@@ -337,7 +353,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
                 void handleSubmit(event);
               }
             }}
-            placeholder={isConfirmingMode ? "继续描述需求...（Shift+Enter 换行，Enter 发送）" : "输入你的模型想法... （Shift+Enter 换行，Enter 发送）"}
+            placeholder={isConfirmingMode || isRequirementConfirmed
+              ? "继续描述需求，或输入“生成代码”...（Shift+Enter 换行，Enter 发送）"
+              : "输入你的模型想法... （Shift+Enter 换行，Enter 发送）"}
             disabled={isLoading}
             className="message-input"
             rows={1}
@@ -364,7 +382,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           <button
             type="button"
             onClick={handleFillExample}
-            disabled={isLoading || isConfirmingMode}
+            disabled={isLoading || isConfirmingMode || isRequirementConfirmed}
             className="text-button example-btn"
             title="填充随机示例"
           >

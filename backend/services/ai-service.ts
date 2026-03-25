@@ -107,6 +107,13 @@ interface MessagesApiOptions {
   temperature: number;
 }
 
+interface AnthropicMessagesResponse {
+  content?: Array<{
+    type?: string;
+    text?: string;
+  }>;
+}
+
 interface GenerationProgressEvent {
   stage: string;
   message: string;
@@ -175,8 +182,13 @@ export async function generateOpenSCAD(
     reportProgress?.({ stage: 'code_start', message: '模型正在推理并生成 OpenSCAD 代码' });
     
     if (OPENSCAD_API_PROTOCOL === 'anthropic-messages') {
+      const claudeApiKey = CLAUDE_API_KEY;
+      if (!claudeApiKey) {
+        throw new Error('未配置 Claude API Key（QN_API_KEY）');
+      }
+
       rawModelOutput = await callMessagesApi({
-        apiKey: CLAUDE_API_KEY,
+        apiKey: claudeApiKey,
         baseUrl: CLAUDE_BASE_URL,
         apiPath: OPENSCAD_API_PATH,
         model: OPENSCAD_MODEL,
@@ -307,6 +319,8 @@ export async function askProductManager(userInput: string, conversationHistory: 
   response: string;
   isNeedMoreInfo: boolean;
   isClear: boolean;
+  shouldGenerate: boolean;
+  confirmedRequirement?: string;
 }> {
   if (!PRODUCT_MANAGER_API_KEY) {
     throw new Error('未配置产品经理智能体 API Key（QN_API_KEY）');
@@ -315,11 +329,13 @@ export async function askProductManager(userInput: string, conversationHistory: 
   const systemPrompt = `你是一个专业的 OpenSCAD 3D 参数化建模产品经理。你的职责是通过与用户交互来明确 OpenSCAD 3D 建模需求。
 
 !! 重要 !!：这是关于用代码生成 3D CAD 模型的，不是网页设计或其他类型的项目。
+!! 强制规则 !!：你绝对不能输出 OpenSCAD 代码、JSON、代码块或任何可执行代码。你只负责需求确认。
 
 你的任务：
 1) 用户描述他们想要的 3D 模型后，主动询问关键细节
 2) 通过多轮对话逐步明确需求
-3) 当信息足够时输出【需求确认完成】
+3) 当信息足够时输出【需求确认完成】并给出【最终需求】
+4) 只有当用户明确说“生成代码/开始生成/出代码”时，才输出【请Claude生成代码】
 
 需要确认的关键信息：
 ✓ 主体几何形状（立方体、圆柱、球体、锥体或组合）
@@ -336,15 +352,31 @@ export async function askProductManager(userInput: string, conversationHistory: 
 【反馈】
 根据您的描述，我理解的是一个 200×100×50mm 的参数化立方体。
 
-当信息完整时最后输出：【需求确认完成】
+信息完整时请输出：
+【需求确认完成】
+【最终需求】
+- 用 4~8 条要点总结可用于 Claude 生成代码的完整需求
+
+如果用户还没说“生成代码”，请额外输出：
+【状态】等待用户下达“生成代码”指令
+
+只有当用户明确要求生成代码时，再额外输出：
+【请Claude生成代码】
 
 语气：专业、清晰、高效`;
 
   // 构建消息历史
   const messages: ConversationMessage[] = [
-    ...conversationHistory,
+    ...conversationHistory.map((msg) => ({
+      role: msg.role,
+      content: sanitizeConversationContent(msg.content),
+    })),
     { role: 'user', content: userInput }
   ];
+
+  const conversationText = messages
+    .map((msg) => `${msg.role === 'user' ? '用户' : '助手'}: ${msg.content}`)
+    .join('\n');
 
   if (PRODUCT_MANAGER_API_PROTOCOL === 'anthropic-messages') {
     const response = await callMessagesApi({
@@ -354,17 +386,22 @@ export async function askProductManager(userInput: string, conversationHistory: 
       model: PRODUCT_MANAGER_MODEL,
       maxTokens: PRODUCT_MANAGER_MAX_TOKENS * 2,
       systemPrompt,
-      userPrompt: userInput,
+      userPrompt: `以下是当前完整对话，请基于对话继续回复：\n${conversationText}`,
       temperature: 0.5,
     });
 
-    const isNeedMoreInfo = !response.includes('【需求确认完成】');
-    const isClear = response.includes('【需求确认完成】');
+    const responseText = sanitizeProductManagerResponse(response.trim());
+    const isClear = responseText.includes('【需求确认完成】');
+    const shouldGenerate = responseText.includes('【请Claude生成代码】');
+    const isNeedMoreInfo = !isClear;
+    const confirmedRequirement = extractConfirmedRequirement(responseText);
 
     return {
-      response: response.trim(),
+      response: responseText,
       isNeedMoreInfo,
       isClear,
+      shouldGenerate,
+      confirmedRequirement,
     };
   }
 
@@ -372,10 +409,13 @@ export async function askProductManager(userInput: string, conversationHistory: 
   const response = await Promise.race([
     pmClient.chat.completions.create({
       model: PRODUCT_MANAGER_MODEL,
-      messages: messages.map(msg => ({
-        role: msg.role,
-        content: msg.content,
-      })),
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+        })),
+      ],
       max_tokens: Number.isFinite(PRODUCT_MANAGER_MAX_TOKENS * 2) ? PRODUCT_MANAGER_MAX_TOKENS * 2 : 2048,
       temperature: 0.5,
     }),
@@ -384,15 +424,87 @@ export async function askProductManager(userInput: string, conversationHistory: 
     }),
   ]);
 
-  const responseText = response.choices[0]?.message?.content?.trim() || '';
-  const isNeedMoreInfo = !responseText.includes('【需求确认完成】');
+  const rawResponseText = response.choices[0]?.message?.content?.trim() || '';
+  const responseText = sanitizeProductManagerResponse(rawResponseText);
   const isClear = responseText.includes('【需求确认完成】');
+  const shouldGenerate = responseText.includes('【请Claude生成代码】');
+  const isNeedMoreInfo = !isClear;
+  const confirmedRequirement = extractConfirmedRequirement(responseText);
 
   return {
     response: responseText,
     isNeedMoreInfo,
     isClear,
+    shouldGenerate,
+    confirmedRequirement,
   };
+}
+
+function sanitizeConversationContent(content: string): string {
+  if (!content) {
+    return '';
+  }
+
+  // 防止历史中出现代码污染后续对话风格。
+  return content
+    .replace(/```[\s\S]*?```/g, '[已省略代码内容]')
+    .replace(/<script[\s\S]*?<\/script>/gi, '[已省略脚本内容]')
+    .trim();
+}
+
+function sanitizeProductManagerResponse(responseText: string): string {
+  if (!responseText) {
+    return responseText;
+  }
+
+  if (!containsCodeLikeContent(responseText)) {
+    return responseText;
+  }
+
+  // Kimi 若跑偏输出代码，后端直接拦截并改写成需求澄清文本。
+  return [
+    '【问题】',
+    '- 我不会输出代码；我只负责细化建模方式。',
+    '- 请继续补充：主体几何、关键尺寸(mm)、壁厚/孔位、参数化变量、机械细节。',
+    '【反馈】',
+    '- 已识别到您希望尽快生成，但当前由我先完成建模需求细化。',
+    '【状态】等待用户补充细节',
+  ].join('\n');
+}
+
+function containsCodeLikeContent(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+
+  return /```[\s\S]*?```/.test(normalized)
+    || /<!DOCTYPE|<html|<script|<style/i.test(normalized)
+    || /\b(function|const|let|var|class|import|export)\b/.test(normalized)
+    || /\b(cube|sphere|cylinder|translate|rotate|difference|union)\s*\(/i.test(normalized)
+    || /\{\s*"[^"]+"\s*:\s*/.test(normalized);
+}
+
+function extractConfirmedRequirement(responseText: string): string | undefined {
+  const marker = '【最终需求】';
+  const start = responseText.indexOf(marker);
+  if (start === -1) {
+    return undefined;
+  }
+
+  const afterMarker = responseText.slice(start + marker.length).trim();
+  const stopMarkers = ['【状态】', '【请Claude生成代码】'];
+  let endIndex = afterMarker.length;
+
+  for (const stopMarker of stopMarkers) {
+    const idx = afterMarker.indexOf(stopMarker);
+    if (idx !== -1) {
+      endIndex = Math.min(endIndex, idx);
+    }
+  }
+
+  const extracted = afterMarker.slice(0, endIndex).trim();
+  return extracted || undefined;
 }
 
 async function generateProductBrief(prompt: string): Promise<string> {

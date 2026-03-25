@@ -239,6 +239,8 @@ interface RequirementConfirmationResponse {
   pmResponse: string;
   isNeedMoreInfo: boolean;
   isClear: boolean;
+  shouldGenerate: boolean;
+  confirmedRequirement?: string;
   sessionId?: string;
 }
 
@@ -251,6 +253,7 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
         pmResponse: '请输入您的建模需求',
         isNeedMoreInfo: true,
         isClear: false,
+        shouldGenerate: false,
         sessionId
       });
     }
@@ -273,6 +276,8 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
       pmResponse: result.response,
       isNeedMoreInfo: result.isNeedMoreInfo,
       isClear: result.isClear,
+      shouldGenerate: result.shouldGenerate,
+      confirmedRequirement: result.confirmedRequirement,
       sessionId
     });
   } catch (error) {
@@ -281,6 +286,7 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
       pmResponse: error instanceof Error ? error.message : '产品经理产生了错误',
       isNeedMoreInfo: true,
       isClear: false,
+      shouldGenerate: false,
       sessionId: req.body.sessionId
     });
   }

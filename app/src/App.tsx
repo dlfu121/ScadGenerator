@@ -297,7 +297,7 @@ function analyzeScadSyntax(code: string): SyntaxIssue[] {
 // 页面主容器：协调输入、生成、参数预览三大模块。
 const AppContent: React.FC = () => {
   const { state, dispatch } = useAppState();
-  const [rightView, setRightView] = useState<'code' | 'preview' | 'csg' | 'parameters'>('preview');
+  const [rightView, setRightView] = useState<'code' | 'preview' | 'csg' | 'parameters'>('code');
   const [csgTreeText, setCsgTreeText] = useState('');
   const [csgTreeError, setCsgTreeError] = useState<string | undefined>(undefined);
   const [lastCsgSourceKey, setLastCsgSourceKey] = useState('');

@@ -35,3 +35,6 @@ presentation.html
 build_ppt.py
 *.pptx
 pictures/
+
+# AI提示词文件
+prompt.md
