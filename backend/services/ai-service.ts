@@ -2,43 +2,67 @@ import OpenAI from 'openai';
 import { v4 as uuidv4 } from 'uuid';
 import { processOpenSCADCode } from './code-processor';
 
-const DEEPSEEK_API_KEY = process.env.QINIU_DEEPSEEK_API_KEY || process.env.QN_API_KEY;
-const DEEPSEEK_BASE_URL = process.env.QINIU_DEEPSEEK_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
-const DEEPSEEK_MODEL = process.env.QINIU_DEEPSEEK_MODEL || process.env.OPENSCAD_MODEL || 'deepseek-r1';
-const OPENSCAD_API_PROTOCOL = (process.env.OPENSCAD_API_PROTOCOL || 'openai-compatible').trim().toLowerCase();
+// 用于 OpenSCAD 代码生成的模型配置（支持 claude-4.5-sonnet）
+const CLAUDE_API_KEY = process.env.QN_API_KEY;
+const CLAUDE_BASE_URL = process.env.QINIU_DEEPSEEK_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
+const OPENSCAD_MODEL = process.env.QINIU_DEEPSEEK_MODEL || process.env.OPENSCAD_MODEL || 'claude-4.5-sonnet';
+const OPENSCAD_API_PROTOCOL = (process.env.OPENSCAD_API_PROTOCOL || 'anthropic-messages').trim().toLowerCase();
 const OPENSCAD_API_PATH = process.env.OPENSCAD_API_PATH || '/messages';
 const OPENSCAD_MAX_TOKENS = Number.parseInt(process.env.OPENSCAD_MAX_TOKENS || '1024', 10);
 const OPENSCAD_CHAT_MAX_TOKENS = Number.parseInt(process.env.OPENSCAD_CHAT_MAX_TOKENS || '4096', 10);
+
+// 用于 OpenSCAD 代码修复的模型配置（固定使用 deepseek-r1）
+const DEEPSEEK_API_KEY = process.env.QINIU_DEEPSEEK_API_KEY || process.env.QN_API_KEY;
+const DEEPSEEK_BASE_URL = process.env.QINIU_DEEPSEEK_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
+const DEEPSEEK_MODEL = process.env.QINIU_DEEPSEEK_MODEL || 'deepseek-r1';
+
 const PRODUCT_MANAGER_ENABLED = (process.env.PM_ENABLED || 'true').trim().toLowerCase() !== 'false';
-const PRODUCT_MANAGER_API_KEY = process.env.PM_API_KEY || process.env.CLAUDE_API_KEY;
+const PRODUCT_MANAGER_API_KEY = process.env.QN_API_KEY;
 const PRODUCT_MANAGER_BASE_URL = process.env.PM_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
 const PRODUCT_MANAGER_API_PATH = process.env.PM_API_PATH || '/messages';
-const PRODUCT_MANAGER_MODEL = process.env.PM_MODEL || 'claude-4.5-sonnet';
+const PRODUCT_MANAGER_MODEL = process.env.PM_MODEL || 'moonshotai/kimi-k2.5';
 const PRODUCT_MANAGER_MAX_TOKENS = Number.parseInt(process.env.PM_MAX_TOKENS || '1024', 10);
 const PRODUCT_MANAGER_API_PROTOCOL = (process.env.PM_API_PROTOCOL || 'openai-compatible').trim().toLowerCase();
 
-let openaiClient: OpenAI | null = null;
+let claudeClient: OpenAI | null = null;
+let deepseekClient: OpenAI | null = null;
 let productManagerClient: OpenAI | null = null;
 
-function getOpenAIClient(): OpenAI {
-  if (!DEEPSEEK_API_KEY) {
-    throw new Error('未配置七牛 DeepSeek API Key（QINIU_DEEPSEEK_API_KEY 或 QN_API_KEY）');
+function getClaudeClient(): OpenAI {
+  if (!CLAUDE_API_KEY) {
+    throw new Error('未配置 Claude API Key（QN_API_KEY）');
   }
 
-  if (!openaiClient) {
-    openaiClient = new OpenAI({
+  if (!claudeClient) {
+    claudeClient = new OpenAI({
+      apiKey: CLAUDE_API_KEY,
+      baseURL: CLAUDE_BASE_URL,
+      dangerouslyAllowBrowser: false,
+    });
+  }
+
+  return claudeClient;
+}
+
+function getDeepseekClient(): OpenAI {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error('未配置 DeepSeek API Key（QINIU_DEEPSEEK_API_KEY 或 QN_API_KEY）');
+  }
+
+  if (!deepseekClient) {
+    deepseekClient = new OpenAI({
       apiKey: DEEPSEEK_API_KEY,
       baseURL: DEEPSEEK_BASE_URL,
       dangerouslyAllowBrowser: false,
     });
   }
 
-  return openaiClient;
+  return deepseekClient;
 }
 
 function getProductManagerClient(): OpenAI {
   if (!PRODUCT_MANAGER_API_KEY) {
-    throw new Error('未配置产品经理智能体 API Key（PM_API_KEY 或 CLAUDE_API_KEY）');
+    throw new Error('未配置产品经理智能体 API Key（QN_API_KEY）');
   }
 
   if (!productManagerClient) {
@@ -52,11 +76,15 @@ function getProductManagerClient(): OpenAI {
   return productManagerClient;
 }
 
-interface AnthropicMessagesResponse {
-  content?: Array<{
-    type?: string;
-    text?: string;
-  }>;
+interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+interface RequirementConfirmation {
+  isConfirmed: boolean;
+  finalBrief: string;
+  conversationHistory: ConversationMessage[];
 }
 
 // AI 生成模块对外返回的数据结构。
@@ -106,7 +134,7 @@ export async function generateOpenSCAD(
   let productBrief = '';
 
   try {
-    const openai = getOpenAIClient();
+    const claude = getClaudeClient();
     reportProgress?.({ stage: 'queue', message: '已收到需求，正在准备建模流程' });
 
     if (PRODUCT_MANAGER_ENABLED) {
@@ -145,22 +173,35 @@ export async function generateOpenSCAD(
       : prompt;
 
     reportProgress?.({ stage: 'code_start', message: '模型正在推理并生成 OpenSCAD 代码' });
-    const response = await Promise.race([
-      openai.chat.completions.create({
-        model: DEEPSEEK_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: deepseekPrompt }
-        ],
-          max_tokens: Number.isFinite(OPENSCAD_CHAT_MAX_TOKENS) ? OPENSCAD_CHAT_MAX_TOKENS : 4096,
+    
+    if (OPENSCAD_API_PROTOCOL === 'anthropic-messages') {
+      rawModelOutput = await callMessagesApi({
+        apiKey: CLAUDE_API_KEY,
+        baseUrl: CLAUDE_BASE_URL,
+        apiPath: OPENSCAD_API_PATH,
+        model: OPENSCAD_MODEL,
+        maxTokens: OPENSCAD_CHAT_MAX_TOKENS,
+        systemPrompt,
+        userPrompt: deepseekPrompt,
         temperature: 0.7,
-      }),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('AI 生成超时')), 120000);
-      })
-    ]);
-
-    rawModelOutput = response.choices[0]?.message?.content || '';
+      });
+    } else {
+      const response = await Promise.race([
+        claude.chat.completions.create({
+          model: OPENSCAD_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: deepseekPrompt }
+          ],
+          max_tokens: Number.isFinite(OPENSCAD_CHAT_MAX_TOKENS) ? OPENSCAD_CHAT_MAX_TOKENS : 4096,
+          temperature: 0.7,
+        }),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('AI 生成超时')), 120000);
+        })
+      ]);
+      rawModelOutput = response.choices[0]?.message?.content || '';
+    }
 
     reportProgress?.({
       stage: 'code_done',
@@ -183,7 +224,7 @@ export async function generateOpenSCAD(
       : undefined;
 
     reportProgress?.({ stage: 'error', message: `生成阶段失败：${message}` });
-    console.error('DeepSeek API 调用失败:', message);
+    console.error('Claude API 代码生成失败:', message);
     throw new GenerateOpenSCADFailure(message, fallbackResult);
   }
 }
@@ -196,8 +237,6 @@ export async function fixOpenSCADCode(
   let rawModelOutput = '';
 
   try {
-    const openai = getOpenAIClient();
-
     const systemPrompt = `你是一个 OpenSCAD 代码修复器。你会收到一段存在问题的 OpenSCAD 代码和编译错误信息。
 
 强制规则（必须遵守）：
@@ -213,8 +252,10 @@ export async function fixOpenSCADCode(
       openscadCode,
     ].join('\n\n');
 
+    // 修复函数固定使用 DeepSeek R1 和 openai-compatible 协议
+    const deepseek = getDeepseekClient();
     const response = await Promise.race([
-      openai.chat.completions.create({
+      deepseek.chat.completions.create({
         model: DEEPSEEK_MODEL,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -227,7 +268,6 @@ export async function fixOpenSCADCode(
         setTimeout(() => reject(new Error('AI 修复超时')), 120000);
       })
     ]);
-
     rawModelOutput = response.choices[0]?.message?.content || '';
     return buildGenerateResult(rawModelOutput, sessionId);
   } catch (error) {
@@ -237,7 +277,7 @@ export async function fixOpenSCADCode(
       ? buildGenerateResult(extractedRawOutput, sessionId)
       : undefined;
 
-    console.error('DeepSeek 代码修复失败:', message);
+    console.error('DeepSeek R1 代码修复失败:', message);
     throw new GenerateOpenSCADFailure(message, fallbackResult);
   }
 }
@@ -262,27 +302,121 @@ function buildGenerateResult(rawModelOutput: string, sessionId?: string, product
   };
 }
 
-async function generateProductBrief(prompt: string): Promise<string> {
+// 与产品经理进行多轮对话来确认需求
+export async function askProductManager(userInput: string, conversationHistory: ConversationMessage[] = []): Promise<{
+  response: string;
+  isNeedMoreInfo: boolean;
+  isClear: boolean;
+}> {
   if (!PRODUCT_MANAGER_API_KEY) {
-    throw new Error('未配置产品经理智能体 API Key（PM_API_KEY 或 CLAUDE_API_KEY）');
+    throw new Error('未配置产品经理智能体 API Key（QN_API_KEY）');
   }
 
-  const systemPrompt = `你是一个 3D 参数化建模产品经理。你的任务是：
-1) 理解用户需求并补全可执行的建模要点；
-2) 输出给 OpenSCAD 工程师的实现方案；
-3) 只输出简洁中文方案，不输出 OpenSCAD 代码。`;
+  const systemPrompt = `你是一个专业的 OpenSCAD 3D 参数化建模产品经理。你的职责是通过与用户交互来明确 OpenSCAD 3D 建模需求。
 
-  const userPrompt = [
-    '请将以下用户需求整理为“建模方案”，用于后续代码生成。',
-    '输出建议包含：',
-    '- 模型目标',
-    '- 关键结构与尺寸',
-    '- 参数化变量建议（名称/含义/默认值）',
-    '- 建模步骤（简洁）',
-    '- 约束与注意事项',
-    '',
-    `用户需求：${prompt}`,
-  ].join('\n');
+!! 重要 !!：这是关于用代码生成 3D CAD 模型的，不是网页设计或其他类型的项目。
+
+你的任务：
+1) 用户描述他们想要的 3D 模型后，主动询问关键细节
+2) 通过多轮对话逐步明确需求
+3) 当信息足够时输出【需求确认完成】
+
+需要确认的关键信息：
+✓ 主体几何形状（立方体、圆柱、球体、锥体或组合）
+✓ 关键尺寸参数（长、宽、高或半径等，单位毫米 mm）
+✓ 需要参数化的变量（哪些尺寸是可调的）
+✓ 特殊特征（孔洞、倒角、圆角、凹陷等）
+✓ 组合方式（并集、差集、交集）
+
+回复格式范例：
+【问题】
+- 请问您想要的是什么基本形状？立方体还是其他形状？
+- 您需要设定多少毫米的长宽高尺寸？
+
+【反馈】
+根据您的描述，我理解的是一个 200×100×50mm 的参数化立方体。
+
+当信息完整时最后输出：【需求确认完成】
+
+语气：专业、清晰、高效`;
+
+  // 构建消息历史
+  const messages: ConversationMessage[] = [
+    ...conversationHistory,
+    { role: 'user', content: userInput }
+  ];
+
+  if (PRODUCT_MANAGER_API_PROTOCOL === 'anthropic-messages') {
+    const response = await callMessagesApi({
+      apiKey: PRODUCT_MANAGER_API_KEY,
+      baseUrl: PRODUCT_MANAGER_BASE_URL,
+      apiPath: PRODUCT_MANAGER_API_PATH,
+      model: PRODUCT_MANAGER_MODEL,
+      maxTokens: PRODUCT_MANAGER_MAX_TOKENS * 2,
+      systemPrompt,
+      userPrompt: userInput,
+      temperature: 0.5,
+    });
+
+    const isNeedMoreInfo = !response.includes('【需求确认完成】');
+    const isClear = response.includes('【需求确认完成】');
+
+    return {
+      response: response.trim(),
+      isNeedMoreInfo,
+      isClear,
+    };
+  }
+
+  const pmClient = getProductManagerClient();
+  const response = await Promise.race([
+    pmClient.chat.completions.create({
+      model: PRODUCT_MANAGER_MODEL,
+      messages: messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      })),
+      max_tokens: Number.isFinite(PRODUCT_MANAGER_MAX_TOKENS * 2) ? PRODUCT_MANAGER_MAX_TOKENS * 2 : 2048,
+      temperature: 0.5,
+    }),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('产品经理智能体逐步确认超时')), 120000);
+    }),
+  ]);
+
+  const responseText = response.choices[0]?.message?.content?.trim() || '';
+  const isNeedMoreInfo = !responseText.includes('【需求确认完成】');
+  const isClear = responseText.includes('【需求确认完成】');
+
+  return {
+    response: responseText,
+    isNeedMoreInfo,
+    isClear,
+  };
+}
+
+async function generateProductBrief(prompt: string): Promise<string> {
+  if (!PRODUCT_MANAGER_API_KEY) {
+    throw new Error('未配置产品经理智能体 API Key（QN_API_KEY）');
+  }
+
+  const systemPrompt = `你是一个 3D 参数化建模产品经理。基于明确的建模需求，生成一份完整的建模方案。
+
+输出格式要求：
+1) 模型目标 - 用一句话描述
+2) 关键结构与尺寸 - 主要组件和参数
+3) 参数化变量建议 - 表格形式 (名称/含义/默认值/范围)
+4) 建模步骤 - 5-8 步操作流程
+5) 约束与注意事项 - 可编译性和工艺约束
+
+输出要求：
+- 只输出建模方案，不输出 OpenSCAD 代码
+- 使用简洁的中文
+- 方案信息足够让工程师直接开始编码`;
+
+  const userPrompt = `基于以下明确的建模需求，请生成完整的建模方案：
+
+${prompt}`;
 
   if (PRODUCT_MANAGER_API_PROTOCOL === 'anthropic-messages') {
     return callMessagesApi({

@@ -48,13 +48,13 @@ def build_agent(agent_name: str = "openscad-generator") -> Agent:
 		)
 	)
 
-	# Add a new environment variable for the Claude-4.5-Sonnet API key
-	claude_api_key = os.getenv("CLAUDE_API_KEY")
-	if not claude_api_key:
-		raise RuntimeError("Missing env var CLAUDE_API_KEY")
+	# Use unified QN_API_KEY for all agents
+	qn_api_key = os.getenv("QN_API_KEY")
+	if not qn_api_key:
+		raise RuntimeError("Missing env var QN_API_KEY")
 
 	if agent_name == "claude-4.5-sonnet":
-		custom_client = AsyncOpenAI(base_url="https://api.qnaigc.com/v1", api_key=claude_api_key)
+		custom_client = AsyncOpenAI(base_url="https://api.qnaigc.com/v1", api_key=qn_api_key)
 		set_default_openai_client(custom_client)
 
 	return Agent(

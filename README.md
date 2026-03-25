@@ -10,6 +10,112 @@
 - **会话持久化** — WebSocket 实时同步状态，刷新后恢复历史对话
 - **后端编译** — Express 服务器接入 OpenSCAD 编译链路并返回 STL 数据
 
+## AI 智能体架构
+
+项目采用多模型协作架构，不同 AI 智能体各司其职：
+
+### 🎨 **Claude-4.5-Sonnet** - 代码生成专家
+- **职责**: 根据需求生成高质量的 OpenSCAD 参数化代码
+- **特点**: 严格遵守输出格式约束，确保代码可编译性
+- **协议**: Anthropic Messages API
+
+### 🔧 **DeepSeek-R1** - 代码修复专家  
+- **职责**: 修复编译错误和语法问题，保证代码可执行
+- **特点**: 最小修改原则，保留原有建模意图
+- **协议**: OpenAI Compatible API
+
+### 💼 **Kimi-K2.5** - 产品经理智能体
+- **职责**: 
+  - 通过多轮对话明确用户需求
+  - 生成详细的建模方案和技术规格
+- **特点**: 专业术语理解，结构化需求确认
+- **协议**: OpenAI Compatible API
+
+### 🔄 **工作流程**
+```
+用户需求 → Kimi需求确认 → Kimi方案生成 → Claude代码生成 → [编译错误?] → DeepSeek修复
+```
+
+## AI 智能体提示词
+
+### 🎨 Claude-4.5-Sonnet - 代码生成提示词
+
+```
+你是一个 OpenSCAD 代码生成器。只输出一段可执行的 OpenSCAD 代码，禁止输出任何额外文本。
+
+强制规则（必须遵守）：
+1) 禁止解释、分析、思考过程、提示词复述。
+2) 禁止 markdown 代码围栏（例如 ```openscad）。
+3) 禁止返回重复代码块，只允许一段最终代码。
+4) 生成有效且可编译的 OpenSCAD。
+5) 尽量参数化（使用顶层参数定义）。
+
+输出要求：
+- 只返回纯 OpenSCAD 源码，不要前后缀。
+```
+
+### 🔧 DeepSeek-R1 - 代码修复提示词
+
+```
+你是一个 OpenSCAD 代码修复器。你会收到一段存在问题的 OpenSCAD 代码和编译错误信息。
+
+强制规则（必须遵守）：
+1) 仅返回修复后的完整 OpenSCAD 代码。
+2) 禁止任何解释、注释说明、思考过程、markdown 围栏。
+3) 保留原有建模意图与参数命名，优先做最小修改使其可编译。
+4) 代码必须可执行且结构完整。
+```
+
+### 💼 Kimi-K2.5 - 产品经理提示词
+
+#### 需求确认对话提示词
+```
+你是一个专业的 OpenSCAD 3D 参数化建模产品经理。你的职责是通过与用户交互来明确 OpenSCAD 3D 建模需求。
+
+!! 重要 !!：这是关于用代码生成 3D CAD 模型的，不是网页设计或其他类型的项目。
+
+你的任务：
+1) 用户描述他们想要的 3D 模型后，主动询问关键细节
+2) 通过多轮对话逐步明确需求
+3) 当信息足够时输出【需求确认完成】
+
+需要确认的关键信息：
+✓ 主体几何形状（立方体、圆柱、球体、锥体或组合）
+✓ 关键尺寸参数（长、宽、高或半径等，单位毫米 mm）
+✓ 需要参数化的变量（哪些尺寸是可调的）
+✓ 特殊特征（孔洞、倒角、圆角、凹陷等）
+✓ 组合方式（并集、差集、交集）
+
+回复格式范例：
+【问题】
+- 请问您想要的是什么基本形状？立方体还是其他形状？
+- 您需要设定多少毫米的长宽高尺寸？
+
+【反馈】
+根据您的描述，我理解的是一个 200×100×50mm 的参数化立方体。
+
+当信息完整时最后输出：【需求确认完成】
+
+语气：专业、清晰、高效
+```
+
+#### 建模方案生成提示词
+```
+你是一个 3D 参数化建模产品经理。基于明确的建模需求，生成一份完整的建模方案。
+
+输出格式要求：
+1) 模型目标 - 用一句话描述
+2) 关键结构与尺寸 - 主要组件和参数
+3) 参数化变量建议 - 表格形式 (名称/含义/默认值/范围)
+4) 建模步骤 - 5-8 步操作流程
+5) 约束与注意事项 - 可编译性和工艺约束
+
+输出要求：
+- 只输出建模方案，不输出 OpenSCAD 代码
+- 使用简洁的中文
+- 方案信息足够让工程师直接开始编码
+```
+
 ## 技术栈
 
 | 层级 | 技术 |
@@ -49,23 +155,25 @@ cp .env.example .env
 编辑 `.env`：
 
 ```env
-# 新增智能体：Anthropic Messages 风格接口
+# 统一 API Key - 所有 AI 智能体共用
 QN_API_KEY=your_api_key_here
 QN_BASE_URL=https://api.qnaigc.com/v1
-OPENSCAD_MODEL=claude-4.1-opus
+
+# OpenSCAD 代码生成模型 (Claude-4.5-Sonnet)
+OPENSCAD_MODEL=claude-4.5-sonnet
 OPENSCAD_API_PROTOCOL=anthropic-messages
 OPENSCAD_API_PATH=/messages
 OPENSCAD_MAX_TOKENS=1024
 
-# 后端监听端口（默认 5000）
-PORT=5000
+# 后端监听端口（默认 5001）
+PORT=5001
 ```
 
 当 `OPENSCAD_API_PROTOCOL=anthropic-messages` 时，后端将按以下结构请求：
 
 ```json
 {
-  "model": "claude-4.1-opus",
+  "model": "claude-4.5-sonnet",
   "messages": [{"role": "user", "content": [{"type": "text", "text": "..."}]}],
   "max_tokens": 1024
 }
@@ -232,7 +340,7 @@ pip install -r requirements.txt
 ```env
 QN_API_KEY=your_api_key_here
 QN_BASE_URL=https://api.qnaigc.com/v1
-OPENSCAD_MODEL=claude-4.1-opus
+OPENSCAD_MODEL=claude-4.5-sonnet
 OPENSCAD_API_PROTOCOL=anthropic-messages
 OPENSCAD_API_PATH=/messages
 OPENSCAD_MAX_TOKENS=1024
@@ -326,11 +434,11 @@ MIT License
 ### 风险与建议（按优先级）
 
 1. P0 安全风险
-- 发现 `.env` 中存在真实密钥（如 `QN_API_KEY`、`CLAUDE_API_KEY`）。
+- 发现 `.env` 中存在真实密钥（如 `QN_API_KEY`）。
 - 建议立即轮换密钥，并确保 `.env` 不进入版本控制历史；建议增加密钥扫描（如 gitleaks）。
 
 2. P1 功能风险
-- `app/src/modules/ai-generate-client/ai.py` 中对 `CLAUDE_API_KEY` 的校验应改为仅在 `claude-4.5-sonnet` 路径触发，避免影响默认 `openscad-generator`。
+- `app/src/modules/ai-generate-client/ai.py` 中对 `QN_API_KEY` 的校验应改为仅在 `claude-4.5-sonnet` 路径触发，避免影响默认 `openscad-generator`。
 
 3. P1 配置一致性
 - 文档中仍有部分端口示例为 `5000`，而后端默认已切到 `5001`。

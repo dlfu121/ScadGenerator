@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { generateOpenSCAD, fixOpenSCADCode } from '../services/ai-service';
+import { generateOpenSCAD, fixOpenSCADCode, askProductManager } from '../services/ai-service';
 import { openscadCompiler } from '../services/openscad-compiler';
 import { emitSessionEvent } from '../services/websocket';
 
@@ -225,6 +225,64 @@ router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<P
       sessionId: fallback?.sessionId || req.body.sessionId || '',
       error: error instanceof Error ? error.message : '修复失败'
     } as ParametricChatResponse);
+  }
+});
+
+// 与产品经理进行多轮对话来确认需求
+interface RequirementConfirmationRequest {
+  userInput: string;
+  conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  sessionId?: string;
+}
+
+interface RequirementConfirmationResponse {
+  pmResponse: string;
+  isNeedMoreInfo: boolean;
+  isClear: boolean;
+  sessionId?: string;
+}
+
+router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfirmationRequest>, res: Response<RequirementConfirmationResponse>) => {
+  try {
+    const { userInput, conversationHistory = [], sessionId } = req.body;
+
+    if (!userInput || !userInput.trim()) {
+      return res.status(400).json({
+        pmResponse: '请输入您的建模需求',
+        isNeedMoreInfo: true,
+        isClear: false,
+        sessionId
+      });
+    }
+
+    const result = await askProductManager(userInput, conversationHistory);
+
+    // 通过 WebSocket 发送进度事件
+    if (sessionId) {
+      emitSessionEvent(sessionId, {
+        type: 'requirement_confirmation',
+        stage: result.isClear ? 'confirmed' : 'clarifying',
+        message: result.response,
+        isNeedMoreInfo: result.isNeedMoreInfo,
+        isClear: result.isClear,
+        timestamp: Date.now(),
+      });
+    }
+
+    res.json({
+      pmResponse: result.response,
+      isNeedMoreInfo: result.isNeedMoreInfo,
+      isClear: result.isClear,
+      sessionId
+    });
+  } catch (error) {
+    console.error('需求确认错误:', error);
+    res.status(500).json({
+      pmResponse: error instanceof Error ? error.message : '产品经理产生了错误',
+      isNeedMoreInfo: true,
+      isClear: false,
+      sessionId: req.body.sessionId
+    });
   }
 });
 
