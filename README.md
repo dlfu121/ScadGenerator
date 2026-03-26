@@ -133,9 +133,42 @@
 
 - **Node.js** >= 18
 - **npm** >= 9
-- **Python** >= 3.10（仅使用 Python AI 客户端时需要）
+- **Python** >= 3.10（仅使用 Python AI 客户端时需要，推荐 3.10~3.12）
 - 兼容 OpenAI 接口的 **API Key**（支持七牛 DeepSeek 网关或其他服务）
 - 支持 WebGL 的现代浏览器（Chrome / Edge / Firefox 最新版）
+
+## 📦 安装清单（会安装哪些东西）
+
+从 GitHub 拉取本项目后，通常会安装以下组件：
+
+### 1) 必装：Node.js 依赖（`npm`）
+
+执行 `npm run install:all` 会安装两部分依赖：
+
+- **根目录依赖（后端/工具链）**
+  - 运行时：`express`、`cors`、`dotenv`、`openai`、`ws`、`uuid`
+  - 开发时：`typescript`、`tsx`、`concurrently`、`@types/*`
+- **`app/` 前端依赖**
+  - 运行时：`react`、`react-dom`、`three`、`styled-jsx`
+  - 开发时：`vite`、`typescript`、`@vitejs/plugin-react`、`@types/react`、`@types/react-dom`
+
+> 以上依赖会自动写入本地 `node_modules/`，无需手动逐个安装。
+
+### 2) 可选：Python 依赖（仅当你要用 Python AI 客户端）
+
+执行 `pip install -r requirements.txt` 会安装：
+
+- `openai>=1.50.0`
+- `openai-agents>=0.0.12`
+- `python-dotenv>=1.0.1`
+- `eval_type_backport>=0.3.1`
+
+若你使用 Python 3.8，可改用：`requirements-py38.txt`。
+
+### 3) 可选：GitHub CLI（仅当你要在本机命令行创建 PR）
+
+- Windows 安装示例：`winget install --id GitHub.cli -e --source winget`
+- 登录：`& "C:\Program Files\GitHub CLI\gh.exe" auth login`
 
 ## 🚀 快速开始
 
@@ -151,7 +184,11 @@ cd ScadGenerator
 复制示例文件并填写你的 API Key：
 
 ```bash
+# macOS / Linux
 cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
 编辑 `.env` 文件（只需配置这两项）：
@@ -168,6 +205,17 @@ QN_BASE_URL=https://api.qnaigc.com/v1
 ```bash
 # 一键安装所有依赖
 npm run install:all
+```
+
+如果你只安装某一侧：
+
+```bash
+# 仅安装根目录（后端）依赖
+npm install
+
+# 仅安装前端依赖
+cd app
+npm install
 ```
 
 ### 4. 启动开发服务器
@@ -193,6 +241,65 @@ npm run dev
 ```
 
 点击生成，AI 智能体将协作生成 OpenSCAD 代码并直接显示在右侧代码编辑器中。
+
+## 🚢 部署流程（从拉代码到上线）
+
+下面给出一个可直接执行的标准流程（单机部署）：
+
+### Step 1) 准备环境
+
+1. 安装 Node.js（建议 LTS，版本 >=18）
+2. 确认 npm 可用：`npm -v`
+3. （可选）安装 Python 3.10+，仅用于 Python 客户端
+4. 机器上可执行 `openscad`（或在 `.env` 配置 `OPENSCAD_BIN`）
+
+### Step 2) 拉取代码并配置环境变量
+
+```bash
+git clone <仓库地址>
+cd ScadGenerator
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```env
+QN_API_KEY=your_api_key_here
+QN_BASE_URL=https://api.qnaigc.com/v1
+# 可选：
+# PORT=5001
+# OPENSCAD_BIN=openscad
+```
+
+### Step 3) 安装依赖并构建
+
+```bash
+npm run install:all
+npm run build
+```
+
+构建产物说明：
+- 前端：`app/dist`
+- 后端：`dist/server`
+
+### Step 4) 启动生产服务
+
+```bash
+npm run start
+```
+
+默认监听：
+- HTTP API：`http://localhost:5001`
+- WebSocket：`ws://localhost:5001/ws`
+
+### Step 5) 验证部署
+
+1. 打开前端地址（开发环境通常是 `http://localhost:5173`；生产可用 Nginx 托管 `app/dist`）
+2. 发起一次生成请求，确认：
+   - 对话可正常返回
+   - 右侧代码区出现 OpenSCAD 代码
+   - 预览区能看到模型
+3. 若出现报错，先检查后端日志与 `.env` 配置
 
 ## 🏗️ 项目架构
 
