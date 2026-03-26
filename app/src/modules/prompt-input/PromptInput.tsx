@@ -57,6 +57,44 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
 
   const makeTimestamp = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 
+  const isTimeoutLike = (text: string) => /超时|timed out|timeout|time out/i.test(text);
+  const isRateLimitLike = (text: string) =>
+    /429|rate limit|rate-limit|too many requests|RPM/i.test(text);
+
+  const buildTimeoutAnalysisMessage = (errorText: string) => {
+    const sanitized = errorText.trim();
+    return [
+      '⏱️ 响应超时，请稍后重试。',
+      sanitized ? `（详情：${sanitized}）` : '',
+      '',
+      '可能原因：',
+      '- 网络波动或代理导致请求返回变慢',
+      '- 后端 AI 调用/多轮确认耗时较长（请求可能在内部排队）',
+      '- 你的描述较复杂或较长，推理成本更高',
+      '',
+      '等待建议：',
+      '- 先稍等 30-60 秒后再发一次',
+      '- 必要时把需求拆成“主体/尺寸/孔位/参数化变量”分步骤确认',
+    ].filter(Boolean).join('\n');
+  };
+
+  const buildRateLimitAnalysisMessage = (errorText: string) => {
+    const sanitized = errorText.trim();
+    return [
+      '⛔ 请求被限流（429：RPM/频率限制），请稍后重试。',
+      sanitized ? `（详情：${sanitized}）` : '',
+      '',
+      '可能原因：',
+      '- 短时间内请求太频繁（超过每分钟请求数 RPM）',
+      '- 后端触发了多次 AI 调用（例如连续生成/反复确认）',
+      '',
+      '等待建议：',
+      '- 先等待 30-120 秒，降低触发频率后再试',
+      '- 避免短时间连续多次点击“生成/修复”，可一次提交完整需求',
+      '- 若你有多用户/多会话同时使用，建议错峰使用',
+    ].filter(Boolean).join('\n');
+  };
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
@@ -117,6 +155,16 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
     setMessages((prev) => [...prev, userMessage]);
     setPrompt('');
 
+    // 立即插入“等待回复”提醒，避免用户误以为没有响应
+    const waitingMessage: ChatMessage = {
+      id: pendingMessageId,
+      role: 'assistant',
+      content: '🤖 正在等待助理回复...（请稍候，最长约 2 分钟；若超时请稍后重试）',
+      timestamp: makeTimestamp(),
+      type: 'text',
+    };
+    setMessages((prev) => [...prev, waitingMessage]);
+
     try {
       // 调用确认需求端点
       const response = await fetch('/api/parametric-chat/confirm-requirement', {
@@ -147,7 +195,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         isConfirmationMarker: hasConfirmationMarker,
       };
 
-      setMessages((prev) => [...prev, kimiMessage]);
+      // 移除“等待中”占位气泡，再追加最终回复
+      setMessages((prev) => [...prev.filter((m) => m.id !== pendingMessageId), kimiMessage]);
 
       // 更新对话历史
       setConversationHistory((prev) => [
@@ -177,15 +226,21 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
 
       pendingMessageIdRef.current = null;
     } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
+      const rateLimitMessage = isRateLimitLike(errorText) ? buildRateLimitAnalysisMessage(errorText) : undefined;
+      const timeoutMessage = isTimeoutLike(errorText) ? buildTimeoutAnalysisMessage(errorText) : undefined;
+      const finalMessage = rateLimitMessage || timeoutMessage || '❌ 对话出错，请重试。';
+
       const errorMessage: ChatMessage = {
         id: `${pendingMessageId}_error`,
         role: 'assistant',
-        content: '❌ 对话出错，请重试。',
+        content: finalMessage,
         timestamp: makeTimestamp(),
         type: 'text',
       };
 
-      setMessages((prev) => [...prev, errorMessage]);
+      // 移除“等待中”占位气泡，再追加错误提示
+      setMessages((prev) => [...prev.filter((m) => m.id !== pendingMessageId), errorMessage]);
       pendingMessageIdRef.current = null;
     }
   };
