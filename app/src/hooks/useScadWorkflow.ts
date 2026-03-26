@@ -73,6 +73,47 @@ function toOpenSCADLiteral(value: unknown): string {
   return `"${escaped}"`;
 }
 
+function isTimeoutLikeText(text: string) {
+  return /超时|timed out|timeout|time out/i.test(text);
+}
+
+function isRateLimitLikeText(text: string) {
+  return /429|rate limit|rate-limit|too many requests|RPM/i.test(text);
+}
+
+function buildTimeoutAnalysisMessage(errorText: string) {
+  const sanitized = errorText.trim();
+  return [
+    '⏱️ 响应超时，请稍后重试。',
+    sanitized ? `（详情：${sanitized}）` : '',
+    '',
+    '可能原因：',
+    '- 网络波动或代理导致请求返回变慢',
+    '- 后端 AI 调用/推理耗时较长（请求可能在内部排队）',
+    '- 请求内容较长或较复杂，推理成本更高',
+    '',
+    '等待建议：',
+    '- 先稍等 30-60 秒后再发一次',
+    '- 必要时把需求拆成“主体/尺寸/孔位/参数化变量”分步骤确认',
+  ].filter(Boolean).join('\n');
+}
+
+function buildRateLimitAnalysisMessage(errorText: string) {
+  const sanitized = errorText.trim();
+  return [
+    '⛔ 请求被限流（429：RPM/频率限制），请稍后重试。',
+    sanitized ? `（详情：${sanitized}）` : '',
+    '',
+    '可能原因：',
+    '- 短时间内请求太频繁（超过每分钟请求数 RPM）',
+    '- 后端触发了多次 AI 调用（连续生成/反复确认）',
+    '',
+    '等待建议：',
+    '- 先等待 30-120 秒后再试，降低触发频率',
+    '- 将操作合并为一次请求（例如一次输入完整需求）',
+  ].filter(Boolean).join('\n');
+}
+
 function syncCodeWithParameters(code: string, parameters: Record<string, any>): string {
   if (!code.trim()) {
     return code;
@@ -181,7 +222,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
 
   const handleGenerate = useCallback(async (prompt: string): Promise<GenerateChatResult> => {
     dispatch({ type: 'CLEAR_AI_PROGRESS' });
-    dispatch({ type: 'ADD_AI_PROGRESS', payload: '请求已发送，正在连接模型服务' });
+    dispatch({ type: 'ADD_AI_PROGRESS', payload: '请求已发送，正在连接模型服务（请稍候，最长约 2 分钟；若超时请稍后重试）' });
     dispatch({ type: 'SET_PROMPT', payload: prompt });
     dispatch({ type: 'SET_LOADING', payload: true });
     dispatch({ type: 'SET_ERROR', payload: undefined });
@@ -240,16 +281,23 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
       };
     } catch (error) {
       const errorText = error instanceof Error ? error.message : '未知错误';
-      dispatch({ type: 'SET_ERROR', payload: error instanceof Error ? error.message : '未知错误' });
+      const rateLimitFriendly = isRateLimitLikeText(errorText) ? buildRateLimitAnalysisMessage(errorText) : undefined;
+      const timeoutFriendly = isTimeoutLikeText(errorText) ? buildTimeoutAnalysisMessage(errorText) : errorText;
+      const finalFriendly = rateLimitFriendly || timeoutFriendly;
+
+      dispatch({ type: 'SET_ERROR', payload: finalFriendly });
       dispatch({ type: 'SET_COMPILE_STATUS', payload: 'error' });
       dispatch({ type: 'SET_COMPILE_PROGRESS', payload: 0 });
       dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '生成失败' });
-      dispatch({ type: 'ADD_AI_PROGRESS', payload: `生成失败：${errorText}` });
+      dispatch({
+        type: 'ADD_AI_PROGRESS',
+        payload: rateLimitFriendly || (isTimeoutLikeText(errorText) ? timeoutFriendly : `生成失败：${errorText}`),
+      });
       dispatch({ type: 'SET_LOADING', payload: false });
 
       return {
         success: false,
-        fullResponse: errorText,
+        fullResponse: finalFriendly,
       };
     }
   }, [compileModel, dispatch, state.sessionId]);
