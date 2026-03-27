@@ -2,17 +2,19 @@ import React, { useEffect, useRef, useState } from 'react';
 
 interface PromptInputProps {
   onGenerate: (prompt: string) => Promise<{ success: boolean; fullResponse: string }>;
+  onDirectCode?: (code: string, parameters?: Record<string, any>) => Promise<void>;
   isLoading: boolean;
   progressTrail: string[];
 }
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'engineer';
   content: string;
   timestamp: string;
-  type?: 'text' | 'progress'; // 'text' 为普通消息，'progress' 为进度消息
-  isConfirmationMarker?: boolean; // 标记【需求确认完成】
+  type?: 'text' | 'progress' | 'waiting'; // 'waiting' 为等待回复占位符
+  isConfirmationMarker?: boolean;
+  agentRole?: 'product_manager' | 'intern' | 'master'; // 智能体角色，用于显示对应头像
 }
 
 interface ConversationMessage {
@@ -26,17 +28,14 @@ interface RequirementConfirmResult {
   isClear?: boolean;
   shouldGenerate?: boolean;
   confirmedRequirement?: string;
+  responderRole?: 'product_manager' | 'intern' | 'master';
   error?: string;
+  openscadCode?: string;
+  parameters?: Record<string, any>;
 }
 
-const EXAMPLE_PROMPTS = [
-  '创建一个参数化的圆柱体，半径10mm，高度50mm',
-  '设计一个带孔的立方体，边长40mm，孔径8mm',
-  '生成一个参数化的球体，半径15mm',
-];
-
 // Prompt 输入模块：负责收集需求文本并触发生成。
-export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading, progressTrail }) => {
+export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onDirectCode, isLoading, progressTrail }) => {
   const [prompt, setPrompt] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -54,12 +53,48 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const pendingMessageIdRef = useRef<string | null>(null);
   const lastProgressCountRef = useRef<number>(0);
+  const engineerProgressCursorRef = useRef<number>(0);
 
   const makeTimestamp = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+
+  const parseEngineerEvent = (raw: string): { stage: string; message: string } | null => {
+    if (!raw.startsWith('ENGINEER|')) {
+      return null;
+    }
+
+    const firstSep = raw.indexOf('|');
+    const secondSep = raw.indexOf('|', firstSep + 1);
+    if (firstSep === -1 || secondSep === -1) {
+      return null;
+    }
+
+    const stage = raw.slice(firstSep + 1, secondSep).trim();
+    const message = raw.slice(secondSep + 1).trim();
+    if (!message) {
+      return null;
+    }
+
+    return { stage, message };
+  };
+
+  const getProgressDisplayText = (raw: string) => {
+    const engineerEvent = parseEngineerEvent(raw);
+    return engineerEvent ? engineerEvent.message : raw;
+  };
 
   const isTimeoutLike = (text: string) => /超时|timed out|timeout|time out/i.test(text);
   const isRateLimitLike = (text: string) =>
     /429|rate limit|rate-limit|too many requests|RPM/i.test(text);
+  const isLikelyScadCode = (text: string) => {
+    const normalized = text.trim();
+    if (!normalized) {
+      return false;
+    }
+
+    // 兜底识别：确认链路中偶发“只在 pmResponse 里返回代码”时也能直达代码区。
+    return /\b(cube|sphere|cylinder|translate|rotate|difference|union|intersection|linear_extrude|polygon)\s*\(/i.test(normalized)
+      || /^[A-Za-z_]\w*\s*=\s*[^;\n]+;$/m.test(normalized);
+  };
 
   const buildTimeoutAnalysisMessage = (errorText: string) => {
     const sanitized = errorText.trim();
@@ -100,6 +135,37 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
   }, [messages]);
 
   useEffect(() => {
+    if (progressTrail.length < engineerProgressCursorRef.current) {
+      engineerProgressCursorRef.current = 0;
+    }
+
+    const startIndex = engineerProgressCursorRef.current;
+    if (progressTrail.length <= startIndex) {
+      return;
+    }
+
+    for (let i = startIndex; i < progressTrail.length; i++) {
+      const engineerEvent = parseEngineerEvent(progressTrail[i]);
+      if (!engineerEvent) {
+        continue;
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}_engineer_${engineerEvent.stage}_${i}`,
+          role: 'engineer',
+          content: engineerEvent.message,
+          timestamp: makeTimestamp(),
+          type: 'waiting',
+        },
+      ]);
+    }
+
+    engineerProgressCursorRef.current = progressTrail.length;
+  }, [progressTrail]);
+
+  useEffect(() => {
     const pendingId = pendingMessageIdRef.current;
     if (!pendingId || !isLoading) {
       lastProgressCountRef.current = 0;
@@ -114,6 +180,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
       // 添加新的进度项
       for (let i = lastProgressCount; i < currentProgressCount; i++) {
         const progressItem = progressTrail[i];
+        if (parseEngineerEvent(progressItem)) {
+          continue;
+        }
         const progressMessageId = `${pendingId}_progress_${i}`;
         
         setMessages((prev) => [
@@ -159,9 +228,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
     const waitingMessage: ChatMessage = {
       id: pendingMessageId,
       role: 'assistant',
-      content: '🤖 正在等待助理回复...（请稍候，最长约 2 分钟；若超时请稍后重试）',
+      content: '正在等待助理回复...（请稍候，最长约 2 分钟，若超时请稍后重试）',
       timestamp: makeTimestamp(),
-      type: 'text',
+      type: 'waiting',
     };
     setMessages((prev) => [...prev, waitingMessage]);
 
@@ -184,15 +253,18 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
 
       // 检查是否有确认标记
       const hasConfirmationMarker = result.pmResponse?.includes('【需求确认完成】');
-      
-      // 添加 Kimi 的回应
+
+      const responderRole = result.responderRole || 'product_manager';
+
+      // 添加智能体回复
       const kimiMessage: ChatMessage = {
         id: `${pendingMessageId}_response`,
-        role: 'assistant',
+        role: responderRole === 'product_manager' ? 'assistant' : 'engineer',
         content: result.pmResponse || '已收到你的信息，继续详细描述。',
         timestamp: makeTimestamp(),
         type: 'text',
         isConfirmationMarker: hasConfirmationMarker,
+        agentRole: responderRole,
       };
 
       // 移除“等待中”占位气泡，再追加最终回复
@@ -212,7 +284,27 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
       if (hasConfirmationMarker || result.isClear) {
         setIsRequirementConfirmed(true);
       }
+      // 当后端直接返回代码时，优先直达代码区并触发编译。
+      const directCode = (result.openscadCode || '').trim()
+        || (
+          responderRole !== 'product_manager' && isLikelyScadCode(result.pmResponse || '')
+            ? (result.pmResponse || '').trim()
+            : ''
+        );
 
+      if (directCode) {
+        setIsConfirmingMode(false);
+        const codeToCompile = directCode;
+        setTimeout(() => {
+          if (onDirectCode) {
+            void onDirectCode(codeToCompile, result.parameters);
+          } else {
+            void handleGenerateAfterConfirmation(codeToCompile);
+          }
+        }, 300);
+        pendingMessageIdRef.current = null;
+        return;
+      }
       // 只有当 Kimi 明确发出“请Claude生成代码”信号时，才调用 Claude 生成。
       if (result.shouldGenerate) {
         setIsConfirmingMode(false);
@@ -286,11 +378,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
     setPrompt('');
   };
 
-  const handleFillExample = () => {
-    const example = EXAMPLE_PROMPTS[Math.floor(Math.random() * EXAMPLE_PROMPTS.length)];
-    setPrompt(example);
-  };
-
   const handleClearMessages = () => {
     setMessages([
       {
@@ -304,6 +391,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
     setIsRequirementConfirmed(false);
     setIsConfirmingMode(false);
     setConfirmedRequirement('');
+    engineerProgressCursorRef.current = progressTrail.length;
   };
 
   const buildRequirementSummary = (history: ConversationMessage[], latestAssistantMessage: string): string => {
@@ -326,12 +414,22 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         <div className="header-title">
           <h3>🤖 模型生成助手</h3>
           <p>
-            {isConfirmingMode || isRequirementConfirmed
-              ? '💬 需求确认中（说“生成代码”后由 Claude 出码）'
-              : '描述你的想法，我会帮你生成 OpenSCAD 代码'}
+            {isLoading
+              ? `⏳ ${progressTrail.length > 0 ? getProgressDisplayText(progressTrail[progressTrail.length - 1]) : 'AI正在处理中...'}`
+              : isConfirmingMode || isRequirementConfirmed
+                ? '💬 需求确认中（默认产品经理沟通，代码问题优先转实习生）'
+                : '描述你的想法，我会帮你生成 OpenSCAD 代码'}
           </p>
         </div>
         <div className="header-actions">
+          {isLoading && (
+            <div className="header-spinner">
+              <svg viewBox="0 0 24 24" className="spinner" width="18" height="18">
+                <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.3" />
+                <path d="M12 2a10 10 0 0 1 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+          )}
           <button
             type="button"
             onClick={handleClearMessages}
@@ -346,28 +444,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         </div>
       </div>
 
-      {/* 快速示例面板 */}
-      {messages.length <= 1 && (
-        <div className="quick-examples-section">
-          <p className="section-label">快速示例：</p>
-          <div className="quick-prompts" role="list" aria-label="快捷提示词">
-            {EXAMPLE_PROMPTS.map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setPrompt(item)}
-                disabled={isLoading}
-                className="quick-prompt-chip"
-                role="listitem"
-              >
-                <span className="chip-icon">💡</span>
-                <span>{item}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* 消息展示面板 */}
       <div className="messages-container" aria-live="polite" aria-label="对话消息">
         <div className="messages-panel">
@@ -377,9 +453,17 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
               className={`message-item ${message.role} ${message.type || 'text'} ${message.isConfirmationMarker ? 'isConfirmationMarker' : ''}`}
               role={message.role === 'user' ? 'log' : 'status'}
             >
-              {message.type !== 'progress' && (
-                <div className="message-avatar">
-                  {message.role === 'user' ? '👤' : '🤖'}
+              {message.type !== 'progress' && message.type !== 'waiting' && (
+                <div className={`message-avatar ${message.agentRole || ''}`}>
+                  {message.role === 'user'
+                    ? '👤'
+                    : message.agentRole === 'product_manager'
+                      ? '👩‍🎨'
+                      : message.agentRole === 'intern'
+                        ? '👨‍💻'
+                        : message.agentRole === 'master'
+                          ? '👨‍🔧'
+                          : '🤖'}
                 </div>
               )}
               <div className="message-content-wrap">
@@ -397,7 +481,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
       </div>
 
       {/* 输入区域 */}
-      <form onSubmit={handleSubmit} className="input-form">
+      <form onSubmit={handleSubmit} className={`input-form ${isLoading ? 'is-loading' : ''}`}>
         <div className="input-wrapper">
           <textarea
             value={prompt}
@@ -434,50 +518,68 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           </button>
         </div>
         <div className="input-footer">
-          <button
-            type="button"
-            onClick={handleFillExample}
-            disabled={isLoading || isConfirmingMode || isRequirementConfirmed}
-            className="text-button example-btn"
-            title="填充随机示例"
-          >
-            📝 示例
-          </button>
         </div>
       </form>
       
       <style>{`
         .prompt-input-module {
-          background: #ffffff;
-          padding: 0;
-          border-radius: 12px;
+          --panel-bg: linear-gradient(165deg, #fbfcff 0%, #f2f6ff 46%, #eef4ff 100%);
+          --brand: #1864ab;
+          --brand-strong: #0f4c81;
+          --brand-soft: #d8ebff;
+          --ink: #172033;
+          --muted: #61708b;
+          --line: #d2dfef;
+
+          background: var(--panel-bg);
+          border-radius: 16px;
+          border: 1px solid var(--line);
+          box-shadow: 0 16px 34px rgba(15, 45, 78, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.75);
           display: flex;
           flex-direction: column;
-          gap: 0;
           height: 100%;
           min-height: 0;
           overflow: hidden;
-          border: 1px solid #e5e7eb;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+          position: relative;
+          font-family: "Space Grotesk", "Avenir Next", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
         }
 
-        /* 头部样式 */
+        .prompt-input-module::before {
+          content: "";
+          position: absolute;
+          top: -140px;
+          right: -110px;
+          width: 320px;
+          height: 320px;
+          border-radius: 50%;
+          background: radial-gradient(circle, rgba(122, 193, 255, 0.36) 0%, rgba(122, 193, 255, 0.04) 62%, transparent 100%);
+          pointer-events: none;
+          z-index: 0;
+        }
+
+        .chat-header,
+        .messages-container,
+        .input-form {
+          position: relative;
+          z-index: 1;
+        }
+
         .chat-header {
           display: flex;
           justify-content: space-between;
           align-items: center;
-          padding: 12px 16px;
-          border-bottom: 1px solid #e5e7eb;
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white;
-          flex-shrink: 0;
+          padding: 14px 16px 12px;
+          border-bottom: 1px solid rgba(24, 100, 171, 0.14);
+          background: linear-gradient(90deg, rgba(24, 100, 171, 0.92) 0%, rgba(39, 126, 201, 0.9) 42%, rgba(84, 168, 230, 0.92) 100%);
+          color: #f8fbff;
+          backdrop-filter: blur(6px);
         }
 
         .header-title h3 {
           margin: 0;
           font-size: 15px;
-          font-weight: 600;
-          line-height: 1.3;
+          font-weight: 700;
+          letter-spacing: 0.2px;
         }
 
         .header-title p {
@@ -485,6 +587,19 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           font-size: 12px;
           opacity: 0.9;
           line-height: 1.2;
+          min-height: 14px;
+        }
+
+        .header-spinner {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+          0%, 100% { opacity: 0.6; }
+          50% { opacity: 1; }
         }
 
         .header-actions {
@@ -494,21 +609,23 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         }
 
         .icon-button {
-          background: rgba(255, 255, 255, 0.2);
-          border: none;
-          color: white;
+          border: 1px solid rgba(255, 255, 255, 0.46);
+          border-radius: 10px;
+          padding: 6px 9px;
+          color: #f8fbff;
+          background: rgba(255, 255, 255, 0.1);
           cursor: pointer;
-          padding: 4px 8px;
-          border-radius: 4px;
-          display: flex;
+          display: inline-flex;
           align-items: center;
           justify-content: center;
-          transition: all 0.2s;
+          transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
           font-size: 0;
         }
 
         .icon-button:hover:not(:disabled) {
-          background: rgba(255, 255, 255, 0.3);
+          background: rgba(255, 255, 255, 0.2);
+          border-color: rgba(255, 255, 255, 0.75);
+          transform: translateY(-1px);
         }
 
         .icon-button:disabled {
@@ -516,64 +633,6 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           cursor: not-allowed;
         }
 
-        /* 快速示例区域 */
-        .quick-examples-section {
-          flex-shrink: 0;
-          padding: 12px 16px;
-          border-bottom: 1px solid #e5e7eb;
-          background: #f9fafb;
-        }
-
-        .section-label {
-          margin: 0 0 8px 0;
-          font-size: 12px;
-          font-weight: 500;
-          color: #6b7280;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-        }
-
-        .quick-prompts {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          list-style: none;
-          margin: 0;
-          padding: 0;
-        }
-
-        .quick-prompt-chip {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          border: 1px solid #d1d5db;
-          border-radius: 20px;
-          background: white;
-          color: #374151;
-          font-size: 12px;
-          padding: 6px 12px;
-          cursor: pointer;
-          transition: all 0.2s;
-          white-space: nowrap;
-        }
-
-        .quick-prompt-chip:hover:not(:disabled) {
-          background: #f3f4f6;
-          border-color: #667eea;
-          color: #667eea;
-          transform: translateY(-1px);
-        }
-
-        .quick-prompt-chip:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        .chip-icon {
-          font-size: 13px;
-        }
-
-        /* 消息容器 */
         .messages-container {
           flex: 1;
           min-height: 0;
@@ -589,12 +648,13 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           display: flex;
           flex-direction: column;
           gap: 12px;
-          background: #fafbfc;
+          background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.62) 0%, rgba(255, 255, 255, 0.78) 100%),
+            radial-gradient(circle at 18% 12%, rgba(202, 232, 255, 0.55) 0%, transparent 46%);
         }
 
-        /* 消息滚动优化 */
         .messages-panel::-webkit-scrollbar {
-          width: 6px;
+          width: 8px;
         }
 
         .messages-panel::-webkit-scrollbar-track {
@@ -602,34 +662,22 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         }
 
         .messages-panel::-webkit-scrollbar-thumb {
-          background: #d1d5db;
-          border-radius: 3px;
+          border-radius: 10px;
+          background: rgba(96, 140, 183, 0.45);
         }
 
         .messages-panel::-webkit-scrollbar-thumb:hover {
-          background: #9ca3af;
+          background: rgba(70, 122, 172, 0.65);
         }
 
         .messages-end {
           height: 0;
         }
 
-        /* 消息项 */
         .message-item {
           display: flex;
-          gap: 8px;
-          animation: slideIn 0.3s ease-out;
-        }
-
-        @keyframes slideIn {
-          from {
-            opacity: 0;
-            transform: translateY(10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+          gap: 10px;
+          animation: slideIn 0.26s ease-out;
         }
 
         .message-item.user {
@@ -637,21 +685,45 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
         }
 
         .message-avatar {
-          font-size: 20px;
-          line-height: 1;
+          width: 30px;
+          height: 30px;
           flex-shrink: 0;
-          width: 28px;
-          height: 28px;
+          border-radius: 10px;
+          font-size: 17px;
           display: flex;
           align-items: center;
           justify-content: center;
+          background: rgba(255, 255, 255, 0.72);
+          border: 1px solid rgba(24, 100, 171, 0.16);
+          box-shadow: 0 4px 12px rgba(23, 35, 62, 0.08);
+        }
+
+        /* 产品经理小K - 可爱女生头像 */
+        .message-avatar.product_manager {
+          background: linear-gradient(135deg, #ffe4ec 0%, #ffcce0 100%);
+          border-color: rgba(255, 105, 180, 0.3);
+          box-shadow: 0 4px 12px rgba(255, 105, 180, 0.15);
+        }
+
+        /* 实习生 - 年轻新手头像 */
+        .message-avatar.intern {
+          background: linear-gradient(135deg, #e8f4ff 0%, #d1eaff 100%);
+          border-color: rgba(66, 165, 245, 0.3);
+          box-shadow: 0 4px 12px rgba(66, 165, 245, 0.15);
+        }
+
+        /* 老师傅 - 资深工程师头像 */
+        .message-avatar.master {
+          background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
+          border-color: rgba(255, 167, 38, 0.3);
+          box-shadow: 0 4px 12px rgba(255, 167, 38, 0.15);
         }
 
         .message-content-wrap {
           display: flex;
           flex-direction: column;
-          gap: 4px;
-          max-width: 75%;
+          gap: 5px;
+          max-width: 78%;
         }
 
         .message-item.user .message-content-wrap {
@@ -662,46 +734,217 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           align-items: flex-start;
         }
 
+        .message-item.engineer .message-content-wrap {
+          align-items: flex-start;
+        }
+
         .message-bubble {
-          background: #e5e7eb;
-          color: #111827;
+          border-radius: 14px;
           padding: 10px 14px;
-          border-radius: 12px;
           font-size: 13px;
-          line-height: 1.5;
-          word-wrap: break-word;
+          line-height: 1.56;
           white-space: pre-wrap;
+          overflow-wrap: anywhere;
+          color: var(--ink);
+          background: rgba(255, 255, 255, 0.9);
+          border: 1px solid rgba(133, 166, 201, 0.26);
+          box-shadow: 0 5px 16px rgba(22, 61, 95, 0.08);
         }
 
         .message-item.assistant .message-bubble {
-          background: #f3f4f6;
-          border-left: 3px solid #667eea;
+          border-left: 3px solid #4fa8df;
+        }
+
+        .message-item.engineer .message-bubble {
+          color: #1f3e2b;
+          background: linear-gradient(145deg, #eefaf2 0%, #e4f6ea 100%);
+          border-color: rgba(62, 152, 89, 0.3);
+          border-left: 3px solid #3a9a5a;
         }
 
         .message-item.assistant.isConfirmationMarker .message-bubble {
-          background: #d1fae5;
-          border-left: 3px solid #10b981;
-          color: #047857;
-          font-weight: 500;
+          background: #e8faf0;
+          border-color: rgba(49, 151, 97, 0.25);
+          border-left: 3px solid #299764;
+          color: #125f3f;
+          font-weight: 600;
         }
 
         .message-item.user .message-bubble {
-          background: #667eea;
-          color: white;
-          border-bottom-right-radius: 4px;
+          color: #f7fcff;
+          background: linear-gradient(145deg, #0f5f99 0%, #177abf 50%, #2f95d7 100%);
+          border-color: rgba(9, 64, 106, 0.28);
+          border-bottom-right-radius: 5px;
         }
 
-        .message-item.assistant .message-bubble {
-          background: #f3f4f6;
-          color: #111827;
-          border-bottom-left-radius: 4px;
+        /* 等待提示/进度消息 - 灰色小字，无头像 */
+        .message-item.waiting .message-bubble {
+          background: transparent;
+          border: none;
+          box-shadow: none;
+          color: #999;
+          font-size: 12px;
+          padding: 4px 0;
+          line-height: 1.4;
         }
 
-        /* 进度消息样式 */
+        .message-item.assistant.waiting .message-content-wrap {
+          max-width: 100%;
+        }
+
         .message-item.progress {
+          margin-top: -3px;
+          margin-bottom: -1px;
+          animation: fadeIn 0.16s ease-out;
+        }
+
+        .message-item.progress .message-content-wrap {
+          max-width: 100%;
           gap: 0;
-          margin: 2px 0;
-          animation: fadeIn 0.2s ease-out;
+        }
+
+        .message-item.progress .message-bubble {
+          background: transparent;
+          border: none;
+          box-shadow: none;
+          color: #5f708d;
+          padding: 2px 0 1px;
+          font-size: 11px;
+          line-height: 1.35;
+        }
+
+        .message-item.waiting {
+          justify-content: center;
+          margin: 8px 0;
+          animation: fadeIn 0.3s ease-out;
+        }
+
+        .message-item.waiting .message-content-wrap {
+          align-items: center;
+          max-width: 100%;
+        }
+
+        .message-item.waiting .message-bubble {
+          background: transparent;
+          border: none;
+          box-shadow: none;
+          color: #8a9aaf;
+          font-size: 12px;
+          padding: 4px 12px;
+          line-height: 1.4;
+        }
+
+        .message-item.waiting .message-meta {
+          display: none;
+        }
+
+        .input-form {
+          flex-shrink: 0;
+          padding: 13px 14px 14px;
+          border-top: 1px solid rgba(24, 100, 171, 0.14);
+          background: linear-gradient(180deg, rgba(255, 255, 255, 0.7) 0%, rgba(242, 248, 255, 0.9) 100%);
+        }
+
+        .input-form.is-loading .input-wrapper {
+          border-color: #667eea;
+          background: linear-gradient(90deg, #f3f4f6 25%, #e5e7eb 50%, #f3f4f6 75%);
+          background-size: 200% 100%;
+          animation: shimmer 1.5s infinite;
+        }
+
+        @keyframes shimmer {
+          0% { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+
+        .input-wrapper {
+          display: flex;
+          gap: 8px;
+          align-items: flex-end;
+          border-radius: 13px;
+          border: 1px solid #bfd3e7;
+          background: rgba(255, 255, 255, 0.95);
+          padding: 7px 8px 7px 10px;
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+          transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+
+        .input-wrapper:focus-within {
+          border-color: #58a9df;
+          box-shadow: 0 0 0 4px rgba(88, 169, 223, 0.2), 0 6px 16px rgba(55, 106, 146, 0.13);
+          transform: translateY(-1px);
+        }
+
+        .message-input {
+          flex: 1;
+          border: none;
+          background: transparent;
+          padding: 5px 6px;
+          min-height: 34px;
+          max-height: 132px;
+          resize: none;
+          outline: none;
+          color: #1b2740;
+          font-family: "Space Grotesk", "Avenir Next", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+          font-size: 13px;
+          line-height: 1.45;
+        }
+
+        .message-input::placeholder {
+          color: #7a8ba5;
+        }
+
+        .message-input:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+
+        .send-button {
+          width: 36px;
+          height: 36px;
+          border-radius: 11px;
+          border: none;
+          flex-shrink: 0;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          font-size: 0;
+          color: #f8fcff;
+          background: linear-gradient(145deg, #0f4d80 0%, #0f71ba 55%, #45a9df 100%);
+          box-shadow: 0 8px 16px rgba(22, 86, 138, 0.3);
+          transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+        }
+
+        .send-button:hover:not(:disabled) {
+          transform: translateY(-1px) scale(1.03);
+          box-shadow: 0 12px 20px rgba(22, 86, 138, 0.34);
+          filter: saturate(1.07);
+        }
+
+        .send-button:disabled {
+          background: linear-gradient(145deg, #9fb2c8 0%, #c2d0df 100%);
+          box-shadow: none;
+          cursor: not-allowed;
+        }
+
+        .spinner {
+          animation: spin 1s linear infinite;
+        }
+
+        .input-footer {
+          display: none;
+        }
+
+        @keyframes slideIn {
+          from {
+            opacity: 0;
+            transform: translateY(8px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
         }
 
         @keyframes fadeIn {
@@ -713,150 +956,18 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
           }
         }
 
-        .message-item.progress .message-bubble {
-          background: transparent;
-          color: #9ca3af;
-          padding: 2px 0;
-          border-radius: 0;
-          font-size: 11px;
-          line-height: 1.4;
-          white-space: pre-wrap;
-        }
-
-        .message-item.progress .message-content-wrap {
-          gap: 0;
-          max-width: 100%;
-        }
-
-        .message-meta {
-          font-size: 11px;
-          color: #9ca3af;
-          padding: 0 4px;
-        }
-
-        /* 输入表单 */
-        .input-form {
-          flex-shrink: 0;
-          padding: 12px 16px;
-          border-top: 1px solid #e5e7eb;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          background: white;
-        }
-
-        .input-wrapper {
-          display: flex;
-          gap: 8px;
-          align-items: flex-end;
-          background: #f9fafb;
-          border: 1px solid #d1d5db;
-          border-radius: 8px;
-          padding: 6px 8px;
-          transition: all 0.2s;
-        }
-
-        .input-wrapper:focus-within {
-          border-color: #667eea;
-          background: white;
-          box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
-
-        .message-input {
-          flex: 1;
-          border: none;
-          background: transparent;
-          padding: 6px;
-          font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-          font-size: 13px;
-          line-height: 1.4;
-          color: #111827;
-          resize: none;
-          max-height: 120px;
-          outline: none;
-          min-height: 32px;
-          max-rows: 5;
-        }
-
-        .message-input::placeholder {
-          color: #9ca3af;
-        }
-
-        .message-input:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
-
-        .send-button {
-          background: #667eea;
-          color: white;
-          border: none;
-          border-radius: 6px;
-          padding: 6px 12px;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: all 0.2s;
-          font-size: 0;
-          flex-shrink: 0;
-        }
-
-        .send-button:hover:not(:disabled) {
-          background: #5568d3;
-          transform: scale(1.05);
-        }
-
-        .send-button:disabled {
-          background: #d1d5db;
-          cursor: not-allowed;
-        }
-
-        .send-button svg {
-          display: flex;
-        }
-
-        .spinner {
-          animation: spin 1s linear infinite;
-        }
-
         @keyframes spin {
-          to { transform: rotate(360deg); }
+          to {
+            transform: rotate(360deg);
+          }
         }
 
-        /* 输入底部 */
-        .input-footer {
-          display: flex;
-          gap: 8px;
-          font-size: 12px;
-        }
-
-        .text-button {
-          background: none;
-          border: none;
-          color: #667eea;
-          cursor: pointer;
-          padding: 0;
-          font-size: 12px;
-          transition: all 0.2s;
-        }
-
-        .text-button:hover:not(:disabled) {
-          color: #5568d3;
-          text-decoration: underline;
-        }
-
-        .text-button:disabled {
-          color: #d1d5db;
-          cursor: not-allowed;
-        }
-
-        /* 响应式设计 */
         @media (max-width: 768px) {
           .chat-header {
             flex-direction: column;
             align-items: flex-start;
             gap: 8px;
+            padding: 12px 13px 11px;
           }
 
           .header-actions {
@@ -864,32 +975,18 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
             justify-content: flex-end;
           }
 
-          .quick-prompts {
-            gap: 6px;
-          }
-
-          .quick-prompt-chip {
-            flex-shrink: 0;
-            font-size: 11px;
-            padding: 5px 10px;
+          .messages-panel {
+            padding: 13px;
           }
 
           .message-content-wrap {
-            max-width: 85%;
-          }
-
-          .message-input {
-            font-size: 14px;
+            max-width: 86%;
           }
         }
 
         @media (max-width: 480px) {
           .prompt-input-module {
-            border-radius: 8px;
-          }
-
-          .chat-header {
-            padding: 10px 12px;
+            border-radius: 12px;
           }
 
           .header-title h3 {
@@ -900,26 +997,27 @@ export const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, isLoading,
             font-size: 11px;
           }
 
-          .quick-examples-section {
-            padding: 10px 12px;
-          }
-
           .messages-panel {
-            padding: 12px;
+            padding: 11px;
             gap: 10px;
-          }
-
-          .input-form {
-            padding: 10px 12px;
-            gap: 6px;
-          }
-
-          .input-wrapper {
-            padding: 5px 6px;
           }
 
           .message-content-wrap {
             max-width: 90%;
+          }
+
+          .message-bubble {
+            font-size: 12px;
+            padding: 9px 12px;
+          }
+
+          .input-form {
+            padding: 10px 10px 11px;
+          }
+
+          .send-button {
+            width: 34px;
+            height: 34px;
           }
         }
       `}</style>

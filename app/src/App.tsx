@@ -323,6 +323,7 @@ const AppContent: React.FC = () => {
     handleCloseError,
     handleExportSTL,
     handleViewCSGTree,
+    handleDirectCode,
   } = useScadWorkflow({ state, dispatch });
 
   const openCSGView = useCallback(() => {
@@ -364,6 +365,7 @@ const AppContent: React.FC = () => {
           <div className="panel chat-panel">
             <PromptInput
               onGenerate={handleGenerate}
+              onDirectCode={handleDirectCode}
               isLoading={state.isLoading}
               progressTrail={state.aiProgressTrail}
             />
@@ -546,6 +548,9 @@ const AppContent: React.FC = () => {
                 onRetry={handleRetry}
                 onFix={handleFix}
                 onCloseError={handleCloseError}
+                onExportSTL={handleExportSTL}
+                hasCode={!!state.openscadCode.trim()}
+                isLoading={state.isLoading}
               />
             ) : rightView === 'parameters' ? (
               <div className="parameters-panel">
