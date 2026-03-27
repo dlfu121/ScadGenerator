@@ -152,6 +152,7 @@ cp .env.example .env
 
 ```env
 QN_API_KEY=your_api_key_here
+//七牛apikey可以通过这个链接注册https://s.qiniu.com/v6zuUj，注册即送1000万token
 QN_BASE_URL=https://api.qnaigc.com/v1
 # 可选：
 # PORT=5001
