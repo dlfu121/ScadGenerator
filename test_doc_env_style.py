@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+PROJECT_ROOT = Path(__file__).resolve().parents[0]
 
 
 def configure_client() -> None:

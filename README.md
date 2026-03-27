@@ -307,6 +307,26 @@ pip install -r requirements.txt
 python app/src/modules/ai-generate-client/ai.py "创建一个参数化的立方体"
 ```
 
+### 🔧 七牛 API Key 测试
+
+如果你想快速测试七牛 AI 网关的 API Key 是否配置正确，可以使用项目根目录下的测试脚本：
+
+```bash
+# 确保已安装依赖
+pip install openai-agents python-dotenv
+
+# 运行测试脚本
+python test_doc_env_style.py
+```
+
+该脚本会：
+- 读取 `.env` 文件中的 `QN_API_KEY` 和 `QN_BASE_URL`
+- 使用 `chat_completions` 模式调用七牛 AI 网关
+- 测试 DeepSeek-R1 模型连接
+- 输出 AI 生成的诗歌作为测试结果
+
+如果脚本成功运行并输出了诗歌内容，说明你的 API Key 配置正确，可以正常使用项目的 AI 功能。
+
 ## ❓ 常见问题
 
 **Q: 启动后前端提示无法连接后端？**  
