@@ -94,6 +94,21 @@ interface GenerateResult {
   parameters: Record<string, any>;
   sessionId: string;
   productBrief?: string;
+  repairSummary?: RepairSummary;
+}
+
+// 修复摘要：记录每轮修复的尝试结果，供前端展示。
+export interface RepairSummary {
+  totalAttempts: number;
+  succeeded: boolean;
+  model: string;
+  attempts: RepairAttempt[];
+}
+
+interface RepairAttempt {
+  round: number;
+  success: boolean;
+  errorMessage?: string;
 }
 
 interface MessagesApiOptions {
@@ -292,6 +307,87 @@ export async function fixOpenSCADCode(
     console.error('DeepSeek R1 代码修复失败:', message);
     throw new GenerateOpenSCADFailure(message, fallbackResult);
   }
+}
+
+/**
+ * 带重试循环的修复流程：修复 → 编译 → 再修复，最多 maxRounds 轮。
+ * 每轮结果记录到 repairSummary，成功编译后立即返回。
+ */
+export async function fixOpenSCADCodeWithRetry(
+  openscadCode: string,
+  compileCallback: (code: string) => Promise<{ success: boolean; error?: string }>,
+  initialError?: string,
+  sessionId?: string,
+  maxRounds = 3
+): Promise<GenerateResult & { repairSummary: RepairSummary }> {
+  const attempts: RepairAttempt[] = [];
+  let currentCode = openscadCode;
+  let currentError = initialError;
+  let lastResult: GenerateResult | undefined;
+
+  for (let round = 1; round <= maxRounds; round++) {
+    let fixedResult: GenerateResult;
+    try {
+      fixedResult = await fixOpenSCADCode(currentCode, currentError, sessionId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      attempts.push({ round, success: false, errorMessage: `AI 修复调用失败: ${message}` });
+      console.error(`修复第 ${round} 轮 AI 调用失败:`, message);
+      break;
+    }
+
+    const codeToCompile = fixedResult.compilableCode || fixedResult.openscadCode;
+    let compileSuccess = false;
+    let compileError: string | undefined;
+
+    try {
+      const compileResult = await compileCallback(codeToCompile);
+      compileSuccess = compileResult.success;
+      compileError = compileResult.error;
+    } catch (err) {
+      compileError = err instanceof Error ? err.message : String(err);
+    }
+
+    attempts.push({
+      round,
+      success: compileSuccess,
+      errorMessage: compileSuccess ? undefined : compileError,
+    });
+
+    lastResult = fixedResult;
+
+    if (compileSuccess) {
+      return {
+        ...fixedResult,
+        repairSummary: {
+          totalAttempts: round,
+          succeeded: true,
+          model: DEEPSEEK_MODEL,
+          attempts,
+        },
+      };
+    }
+
+    // 下一轮使用当前编译错误作为输入
+    currentCode = fixedResult.compilableCode || fixedResult.openscadCode;
+    currentError = compileError;
+  }
+
+  // 所有轮次均未成功编译，返回最后一次修复结果
+  if (!lastResult) {
+    // 全部轮次 AI 调用均失败，降级返回原始代码
+    lastResult = buildGenerateResult(openscadCode, sessionId);
+  }
+
+  return {
+    ...lastResult,
+    repairSummary: {
+      totalAttempts: attempts.length,
+      succeeded: false,
+      model: DEEPSEEK_MODEL,
+      attempts,
+    },
+  };
 }
 
 function buildGenerateResult(rawModelOutput: string, sessionId?: string, productBrief?: string): GenerateResult {

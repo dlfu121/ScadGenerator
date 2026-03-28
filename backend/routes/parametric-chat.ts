@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { generateOpenSCAD, fixOpenSCADCode, askProductManager } from '../services/ai-service';
+import { generateOpenSCAD, fixOpenSCADCode, fixOpenSCADCodeWithRetry, askProductManager, RepairSummary } from '../services/ai-service';
 import { openscadCompiler } from '../services/openscad-compiler';
+import { checkGeometry, GeometryCheckResult } from '../services/geometry-checker';
 import { emitSessionEvent } from '../services/websocket';
 
 // 前端发起参数化建模请求的最小入参。
@@ -17,6 +18,8 @@ interface ParametricChatResponse {
   sessionId: string;
   productBrief?: string;
   error?: string;
+  repairSummary?: RepairSummary;
+  geometryReport?: GeometryCheckResult;
 }
 
 interface CompileRequestBody {
@@ -33,6 +36,12 @@ interface FixRequestBody {
   openscadCode: string;
   compileError?: string;
   sessionId?: string;
+  /** 是否启用重试循环（修复-编译-再修复，最多3轮），默认 true */
+  enableRetry?: boolean;
+}
+
+interface CheckRequestBody {
+  stlBase64: string;
 }
 
 const router = Router();
@@ -201,7 +210,7 @@ router.post('/export/csg', async (req: Request<{}, {}, ExportRequestBody>, res: 
 
 router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<ParametricChatResponse>) => {
   try {
-    const { openscadCode, compileError, sessionId } = req.body;
+    const { openscadCode, compileError, sessionId, enableRetry = true } = req.body;
 
     if (!openscadCode || !openscadCode.trim()) {
       return res.status(400).json({
@@ -213,8 +222,42 @@ router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<P
       } as ParametricChatResponse);
     }
 
+    if (enableRetry) {
+      // 带重试的修复流程：修复 → 编译 → 再修复，最多 3 轮
+      // 通过闭包捕获最后一次成功编译的 STL，避免几何检查时重复编译。
+      let capturedStlData: Parameters<typeof checkGeometry>[0] | undefined;
+      const compileCallback = async (code: string) => {
+        const result = await openscadCompiler.compileToSTL(code, {});
+        if (result.success && result.stlData) {
+          capturedStlData = result.stlData;
+        }
+        return { success: result.success, error: result.error };
+      };
+
+      const fixed = await fixOpenSCADCodeWithRetry(
+        openscadCode,
+        compileCallback,
+        compileError,
+        sessionId,
+        3
+      );
+
+      // 若最终编译成功，对已捕获的 STL 执行几何检查，无需再次编译
+      let geometryReport: GeometryCheckResult | undefined;
+      if (fixed.repairSummary.succeeded && capturedStlData) {
+        try {
+          geometryReport = checkGeometry(capturedStlData);
+        } catch {
+          // 几何检查失败不影响主流程返回
+        }
+      }
+
+      return res.json({ ...fixed, geometryReport } as ParametricChatResponse);
+    }
+
+    // 不启用重试时，单轮修复
     const fixed = await fixOpenSCADCode(openscadCode, compileError, sessionId);
-    return res.json(fixed);
+    return res.json(fixed as ParametricChatResponse);
   } catch (error) {
     console.error('AI修复错误:', error);
     const fallback = (error as { fallbackResult?: ParametricChatResponse })?.fallbackResult;
@@ -225,6 +268,42 @@ router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<P
       sessionId: fallback?.sessionId || req.body.sessionId || '',
       error: error instanceof Error ? error.message : '修复失败'
     } as ParametricChatResponse);
+  }
+});
+
+// 几何完整性与 3D 打印风险检查（接收 Base64 编码的 STL 二进制数据）
+router.post('/check', async (req: Request<{}, {}, CheckRequestBody>, res: Response) => {
+  try {
+    const { stlBase64 } = req.body;
+
+    if (!stlBase64 || !stlBase64.trim()) {
+      return res.status(400).json({
+        status: 'error',
+        error: 'stlBase64 不能为空'
+      });
+    }
+
+    let stlBuffer: Buffer;
+    try {
+      stlBuffer = Buffer.from(stlBase64, 'base64');
+    } catch {
+      return res.status(400).json({
+        status: 'error',
+        error: 'stlBase64 解码失败，请提供有效的 Base64 编码 STL 数据'
+      });
+    }
+
+    const report = checkGeometry(stlBuffer);
+    return res.json({
+      status: 'success',
+      ...report
+    });
+  } catch (error) {
+    console.error('几何检查错误:', error);
+    return res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : '几何检查服务异常'
+    });
   }
 });
 
