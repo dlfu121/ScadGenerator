@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { generateOpenSCAD, fixOpenSCADCode, askProductManager } from '../services/ai-service';
+import { generateOpenSCAD, fixOpenSCADCode, askProductManager, detectMention, handleMentionedRoute } from '../services/ai-service';
 import { openscadCompiler } from '../services/openscad-compiler';
 import { emitSessionEvent } from '../services/websocket';
 
@@ -36,6 +36,10 @@ interface FixRequestBody {
 }
 
 const router = Router();
+
+function readCodePayload(input: unknown): string {
+  return typeof input === 'string' ? input : '';
+}
 
 // 主流程：校验 prompt -> 调用 AI 生成 -> 返回代码与参数。
 router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Response<ParametricChatResponse>) => {
@@ -80,7 +84,8 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
 });
 
 router.post('/compile', async (req: Request<{}, {}, CompileRequestBody>, res: Response) => {
-  const { openscadCode, parameters = {} } = req.body;
+  const openscadCode = readCodePayload(req.body?.openscadCode);
+  const parameters = req.body?.parameters || {};
 
   if (!openscadCode || !openscadCode.trim()) {
     res.setHeader('X-Compile-Status', 'error');
@@ -122,7 +127,8 @@ router.post('/compile', async (req: Request<{}, {}, CompileRequestBody>, res: Re
 });
 
 router.post('/export/stl', async (req: Request<{}, {}, ExportRequestBody>, res: Response) => {
-  const { openscadCode, parameters = {} } = req.body;
+  const openscadCode = readCodePayload(req.body?.openscadCode);
+  const parameters = req.body?.parameters || {};
 
   if (!openscadCode || !openscadCode.trim()) {
     return res.status(400).json({
@@ -161,7 +167,8 @@ router.post('/export/stl', async (req: Request<{}, {}, ExportRequestBody>, res: 
 });
 
 router.post('/export/csg', async (req: Request<{}, {}, ExportRequestBody>, res: Response) => {
-  const { openscadCode, parameters = {} } = req.body;
+  const openscadCode = readCodePayload(req.body?.openscadCode);
+  const parameters = req.body?.parameters || {};
 
   if (!openscadCode || !openscadCode.trim()) {
     return res.status(400).json({
@@ -201,7 +208,9 @@ router.post('/export/csg', async (req: Request<{}, {}, ExportRequestBody>, res: 
 
 router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<ParametricChatResponse>) => {
   try {
-    const { openscadCode, compileError, sessionId } = req.body;
+    const openscadCode = readCodePayload(req.body?.openscadCode);
+    const compileError = req.body?.compileError;
+    const sessionId = req.body?.sessionId;
 
     if (!openscadCode || !openscadCode.trim()) {
       return res.status(400).json({
@@ -218,9 +227,11 @@ router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<P
   } catch (error) {
     console.error('AI修复错误:', error);
     const fallback = (error as { fallbackResult?: ParametricChatResponse })?.fallbackResult;
+    const originalCode = readCodePayload(req.body?.openscadCode);
+    const safeCode = fallback?.openscadCode || originalCode;
     return res.status(500).json({
-      openscadCode: fallback?.openscadCode || '',
-      compilableCode: fallback?.compilableCode || fallback?.openscadCode || '',
+      openscadCode: safeCode,
+      compilableCode: fallback?.compilableCode || safeCode,
       parameters: fallback?.parameters || {},
       sessionId: fallback?.sessionId || req.body.sessionId || '',
       error: error instanceof Error ? error.message : '修复失败'
@@ -241,7 +252,10 @@ interface RequirementConfirmationResponse {
   isClear: boolean;
   shouldGenerate: boolean;
   confirmedRequirement?: string;
+  responderRole?: 'product_manager' | 'intern' | 'master';
   sessionId?: string;
+  openscadCode?: string;
+  parameters?: Record<string, any>;
 }
 
 router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfirmationRequest>, res: Response<RequirementConfirmationResponse>) => {
@@ -258,6 +272,35 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
       });
     }
 
+    // 【新增】检测 @提及 标记，优先处理 @实习生 和 @老师傅
+    const mentionedRole = detectMention(userInput);
+    if (mentionedRole) {
+      const mentionedResult = await handleMentionedRoute(mentionedRole, userInput, conversationHistory);
+      
+      // 通过 WebSocket 发送进度事件
+      if (sessionId) {
+        emitSessionEvent(sessionId, {
+          type: 'mention_routed',
+          stage: 'mention_detected',
+          mentionedRole: mentionedResult.mentionedRole,
+          message: mentionedResult.response,
+          timestamp: Date.now(),
+        });
+      }
+
+      return res.json({
+        pmResponse: mentionedResult.response,
+        isNeedMoreInfo: false, // @提及直接处理，不需要更多信息
+        isClear: false,
+        shouldGenerate: false,
+        responderRole: mentionedResult.responderRole,
+        openscadCode: mentionedResult.openscadCode,
+        parameters: mentionedResult.parameters,
+        sessionId
+      });
+    }
+
+    // 【原有逻辑】无 @提及 时，使用产品经理进行需求确认
     const result = await askProductManager(userInput, conversationHistory);
 
     // 通过 WebSocket 发送进度事件
@@ -278,6 +321,7 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
       isClear: result.isClear,
       shouldGenerate: result.shouldGenerate,
       confirmedRequirement: result.confirmedRequirement,
+      responderRole: result.responderRole,
       sessionId
     });
   } catch (error) {

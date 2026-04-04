@@ -10,6 +10,9 @@ interface ParamPreviewCanvasProps {
   onRetry: () => void;
   onFix: () => void;
   onCloseError: () => void;
+  onExportSTL?: () => void;
+  hasCode?: boolean;
+  isLoading?: boolean;
 }
 
 interface ParameterControlsProps {
@@ -48,12 +51,31 @@ export const ParamPreviewCanvas: React.FC<ParamPreviewCanvasProps> = ({
   onRetry,
   onFix,
   onCloseError,
+  onExportSTL,
+  hasCode = false,
+  isLoading = false,
 }) => {
   const { mountRef, isLoadingMesh } = useThreePreview(stlData);
 
   return (
     <div className="preview-module">
-      <h3>参数化预览</h3>
+      <div className="preview-header">
+        <h3>参数化预览</h3>
+        {onExportSTL && (
+          <div className="preview-actions">
+            <button
+              type="button"
+              className="export-stl-button"
+              onClick={() => {
+                onExportSTL();
+              }}
+              disabled={!hasCode || isLoading}
+            >
+              导出 STL
+            </button>
+          </div>
+        )}
+      </div>
 
       <div className="preview-container">
         <div ref={mountRef} className="three-canvas" />
@@ -92,8 +114,40 @@ export const ParamPreviewCanvas: React.FC<ParamPreviewCanvasProps> = ({
           height: 100%;
         }
 
+        .preview-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 12px;
+        }
+
         .preview-module h3 {
           margin: 0;
+        }
+
+        .preview-actions {
+          display: flex;
+          gap: 8px;
+        }
+
+        .export-stl-button {
+          border: 0;
+          border-radius: 6px;
+          background: #2563eb;
+          color: white;
+          padding: 6px 12px;
+          font-size: 12px;
+          cursor: pointer;
+          transition: background-color 0.2s ease;
+        }
+
+        .export-stl-button:hover:not(:disabled) {
+          background: #1d4ed8;
+        }
+
+        .export-stl-button:disabled {
+          background: #94a3b8;
+          cursor: not-allowed;
         }
 
         .preview-container {
@@ -381,6 +435,9 @@ export const ParamPreview: React.FC<ParamPreviewProps> = ({
   onRetry,
   onFix,
   onCloseError,
+  onExportSTL,
+  hasCode = false,
+  isLoading = false,
   onParameterChange,
 }) => {
   return (
@@ -394,6 +451,9 @@ export const ParamPreview: React.FC<ParamPreviewProps> = ({
         onRetry={onRetry}
         onFix={onFix}
         onCloseError={onCloseError}
+        onExportSTL={onExportSTL}
+        hasCode={hasCode}
+        isLoading={isLoading}
       />
       <ParameterControls parameters={parameters} onParameterChange={onParameterChange} />
 
