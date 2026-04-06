@@ -1013,21 +1013,21 @@ function extractParameters(code: string): Record<string, any> {
 
 /**
  * 检测输入中的 @提及 标记
- * 支持: @需求顾问 / 旧名 @产品经理 / @PM | @代码生成 / 旧名 @老师傅 | @代码助手 / 旧名 @实习生
+ * 支持: @产品经理 / 旧名 @需求顾问 / @PM | @老师傅 / 旧名 @代码生成 | @实习生 / 旧名 @代码助手
  * @returns 返回角色名称，若没有 @提及 则返回 null
  */
 export function detectMention(input: string): 'product_manager' | 'master' | 'intern' | null {
   const normalizedInput = input.toLowerCase();
   
-  if (/@需求顾问|@产品经理|@pm|@product.?manager|@小k/.test(normalizedInput)) {
+  if (/@产品经理|@需求顾问|@pm|@product.?manager|@小k/.test(normalizedInput)) {
     return 'product_manager';
   }
   
-  if (/@代码生成|@老师傅|@master|@craftsman/.test(normalizedInput)) {
+  if (/@老师傅|@代码生成|@master|@craftsman/.test(normalizedInput)) {
     return 'master';
   }
   
-  if (/@代码助手|@实习生|@intern|@apprentice/.test(normalizedInput)) {
+  if (/@实习生|@代码助手|@intern|@apprentice/.test(normalizedInput)) {
     return 'intern';
   }
   
@@ -1056,7 +1056,7 @@ export async function handleMentionedRoute(
   // 清理 @提及 标记
   const cleanedInput = userInput
     .replace(
-      /@需求顾问|@产品经理|@PM|@pm|@product.?manager|@小k|@代码生成|@老师傅|@master|@craftsman|@代码助手|@实习生|@intern|@apprentice/gi,
+      /@产品经理|@需求顾问|@PM|@pm|@product.?manager|@小k|@老师傅|@代码生成|@master|@craftsman|@实习生|@代码助手|@intern|@apprentice/gi,
       '',
     )
     .trim();

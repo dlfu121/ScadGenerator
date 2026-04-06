@@ -70,9 +70,9 @@ type SummonAgentRole = 'product_manager' | 'intern' | 'master';
 
 /** 顶部按钮对应的 @ 标签与对外岗位名（与后端 detectMention 一致） */
 const SUMMON_AGENTS: { role: SummonAgentRole; tag: string; label: string }[] = [
-  { role: 'product_manager', tag: '@需求顾问 ', label: '需求顾问' },
-  { role: 'intern', tag: '@代码助手 ', label: '代码助手' },
-  { role: 'master', tag: '@代码生成 ', label: '代码生成' },
+  { role: 'product_manager', tag: '@产品经理 ', label: '产品经理' },
+  { role: 'intern', tag: '@实习生 ', label: '实习生' },
+  { role: 'master', tag: '@老师傅 ', label: '老师傅' },
 ];
 
 /** 代码将进右侧审阅区时，左侧只显示提醒，避免与右侧差异/说明重复贴整段代码 */
@@ -81,7 +81,7 @@ const DIRECT_CODE_PENDING_REVIEW_REMINDER =
 
 /** 与后端 detectMention 一致：含此类标记时仍走对话/路由，而非直连生成 */
 function mentionsAssistant(input: string): boolean {
-  return /@需求顾问|@产品经理|@pm|@product.?manager|@小k|@代码生成|@老师傅|@master|@craftsman|@代码助手|@实习生|@intern|@apprentice/i.test(
+  return /@产品经理|@需求顾问|@pm|@product.?manager|@小k|@老师傅|@代码生成|@master|@craftsman|@实习生|@代码助手|@intern|@apprentice/i.test(
     input
   );
 }
@@ -89,13 +89,13 @@ function mentionsAssistant(input: string): boolean {
 /** 解析当前输入里优先出现的 @ 岗位（用于按钮高亮与忙碌动画） */
 function detectLocalMentionRole(text: string): SummonAgentRole | null {
   const normalized = text.toLowerCase();
-  if (/@需求顾问|@产品经理|@pm|@product.?manager|@小k/.test(normalized)) {
+  if (/@产品经理|@需求顾问|@pm|@product.?manager|@小k/.test(normalized)) {
     return 'product_manager';
   }
-  if (/@代码助手|@实习生|@intern|@apprentice/.test(normalized)) {
+  if (/@实习生|@代码助手|@intern|@apprentice/.test(normalized)) {
     return 'intern';
   }
-  if (/@代码生成|@老师傅|@master|@craftsman/.test(normalized)) {
+  if (/@老师傅|@代码生成|@master|@craftsman/.test(normalized)) {
     return 'master';
   }
   return null;
@@ -117,7 +117,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       id: 'welcome',
       role: 'assistant',
       content:
-        '你好，我是 OpenSCAD 助手。描述模型后：先自动整理「参数与特点」方案供你确认理解，再生成可编译的参数化示例代码；右侧可继续调参。若已有模型，直接发修改意见（如「高度改成 30」）可快速改代码。需要聊天澄清请用 @需求顾问、@代码助手、@代码生成（也可点上方按钮插入）。',
+        '你好，我是 OpenSCAD 助手。描述模型后：先自动整理「参数与特点」方案供你确认理解，再生成可编译的参数化示例代码；右侧可继续调参。若已有模型，直接发修改意见（如「高度改成 30」）可快速改代码。需要聊天澄清请用 @产品经理、@实习生、@老师傅（也可点上方按钮插入）。',
       timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
     },
   ]);
@@ -802,7 +802,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       return;
     }
 
-    // @提及：仍走确认端点（需求顾问对话或代码助手/代码生成直出代码）
+    // @提及：仍走确认端点（产品经理对话或实习生/老师傅直出代码）
     if (mentionsAssistant(promptText)) {
       if (!isConfirmingMode && !isRequirementConfirmed) {
         setIsConfirmingMode(true);
@@ -811,7 +811,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       return;
     }
 
-    // 已在多轮对话流程中（例如曾使用过 @需求顾问）：后续输入继续走对话
+    // 已在多轮对话流程中（例如曾使用过 @产品经理）：后续输入继续走对话
     if (isConfirmingMode || isRequirementConfirmed) {
       await handleConfirmationChat(promptText);
       return;
@@ -835,7 +835,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         id: 'welcome_reset',
         role: 'assistant',
         content:
-          '会话已清空。描述需求后将先展示参数与特点方案，再生成代码；已有模型时可发修改意见快速修订。需要聊天可用 @需求顾问、@代码助手、@代码生成（或点上方按钮）。',
+          '会话已清空。描述需求后将先展示参数与特点方案，再生成代码；已有模型时可发修改意见快速修订。需要聊天可用 @产品经理、@实习生、@老师傅（或点上方按钮）。',
         timestamp: makeTimestamp(),
       },
     ]);
@@ -875,7 +875,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
               {isLoading
                 ? `⏳ ${progressTrail.length > 0 ? getProgressDisplayText(progressTrail[progressTrail.length - 1]) : 'AI正在处理中...'}`
                 : isConfirmingMode || isRequirementConfirmed
-                  ? '💬 对话模式（@需求顾问 / @代码助手 / @代码生成 或下方按钮）；发送消息继续'
+                  ? '💬 对话模式（@产品经理 / @实习生 / @老师傅 或下方按钮）；发送消息继续'
                   : '先展示方案（参数/特点），再生成代码；有模型后可直接发修改意见'}
             </p>
           </div>
@@ -1279,21 +1279,21 @@ export const PromptInput: React.FC<PromptInputProps> = ({
           box-shadow: 0 4px 12px rgba(23, 35, 62, 0.08);
         }
 
-        /* 需求顾问（原 PM）头像 */
+        /* 产品经理头像 */
         .message-avatar.product_manager {
           background: linear-gradient(135deg, #ffe4ec 0%, #ffcce0 100%);
           border-color: rgba(255, 105, 180, 0.3);
           box-shadow: 0 4px 12px rgba(255, 105, 180, 0.15);
         }
 
-        /* 代码助手头像 */
+        /* 实习生头像 */
         .message-avatar.intern {
           background: linear-gradient(135deg, #e8f4ff 0%, #d1eaff 100%);
           border-color: rgba(66, 165, 245, 0.3);
           box-shadow: 0 4px 12px rgba(66, 165, 245, 0.15);
         }
 
-        /* 代码生成头像 */
+        /* 老师傅头像 */
         .message-avatar.master {
           background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
           border-color: rgba(255, 167, 38, 0.3);
