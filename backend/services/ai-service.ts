@@ -12,6 +12,7 @@ import {
   buildCodeResponderUserPrompt,
   PRODUCT_BRIEF_SYSTEM_PROMPT,
   buildProductBriefUserPrompt,
+  buildRevisionCodegenUserPrompt,
 } from '../config/agent-prompts';
 
 // 用于 OpenSCAD 代码生成的模型配置（支持 claude-4.5-sonnet）
@@ -172,19 +173,46 @@ class GenerateOpenSCADFailure extends Error {
   }
 }
 
+export interface GenerateOpenSCADOptions {
+  /** 已生成过的方案摘要：传入时跳过内部的 generateProductBrief（含空字符串，表示明确不跑简报） */
+  precomputedProductBrief?: string;
+  /** 非空时在现有代码上做修订，而非从零生成 */
+  baseOpenscadCode?: string;
+}
+
 export async function generateOpenSCAD(
   prompt: string,
   sessionId?: string,
-  reportProgress?: ProgressReporter
+  reportProgress?: ProgressReporter,
+  options?: GenerateOpenSCADOptions
 ): Promise<GenerateResult> {
   let rawModelOutput = '';
   let productBrief = '';
+  const revisionBase = options?.baseOpenscadCode?.trim() || '';
+  const isRevision = Boolean(revisionBase);
 
   try {
     const claude = getClaudeClient();
     reportProgress?.({ stage: 'queue', message: '已收到需求，正在准备建模流程' });
 
-    if (PRODUCT_MANAGER_ENABLED) {
+    if (isRevision) {
+      productBrief =
+        options?.precomputedProductBrief !== undefined
+          ? (options.precomputedProductBrief || '').trim()
+          : '';
+      reportProgress?.({
+        stage: 'revise_start',
+        message: '正在根据修改意见更新参数化代码',
+        meta: { baseLength: revisionBase.length },
+      });
+    } else if (options?.precomputedProductBrief !== undefined) {
+      productBrief = (options.precomputedProductBrief || '').trim();
+      reportProgress?.({
+        stage: 'pm_done',
+        message: '已使用前置方案摘要，正在进入代码生成',
+        meta: { briefLength: productBrief.length },
+      });
+    } else if (PRODUCT_MANAGER_ENABLED) {
       reportProgress?.({ stage: 'pm_start', message: '产品经理智能体正在拆解需求' });
       productBrief = await generateProductBrief(prompt);
       reportProgress?.({
@@ -196,11 +224,17 @@ export async function generateOpenSCAD(
 
     // 通过 system prompt 强约束模型输出，降低解释性文本和围栏污染。
     const systemPrompt = MASTER_CODEGEN_SYSTEM_PROMPT;
-    const deepseekPrompt = buildMasterCodegenUserPrompt(prompt, productBrief);
+    const deepseekPrompt = isRevision
+      ? buildRevisionCodegenUserPrompt({
+          userInstruction: prompt,
+          baseCode: revisionBase,
+          productBrief,
+        })
+      : buildMasterCodegenUserPrompt(prompt, productBrief);
 
     reportProgress?.({
       stage: 'code_start',
-      message: '已收到需求，我来帮你把这个设计变成代码，稍等片刻...',
+      message: isRevision ? '正在整合修改并生成完整代码…' : '已收到需求，我来帮你把这个设计变成代码，稍等片刻...',
     });
     
     if (OPENSCAD_API_PROTOCOL === 'anthropic-messages') {
@@ -648,7 +682,119 @@ function extractConfirmedRequirement(responseText: string): string | undefined {
   return extracted || undefined;
 }
 
-async function generateProductBrief(prompt: string): Promise<string> {
+/** 供 /explain-diff-blocks：按块解释 OpenSCAD 差异（与前端 WorkspaceDiffExplainBlock 对齐） */
+export interface DiffExplainBlockInput {
+  index: number;
+  kind: 'replace' | 'delete' | 'insert';
+  adopted: boolean;
+  removed?: string;
+  added?: string;
+}
+
+const DIFF_EXPLAIN_MODEL = process.env.DIFF_EXPLAIN_MODEL || process.env.KIMI_FIX_MODEL || 'moonshotai/kimi-k2.5';
+const DIFF_EXPLAIN_MAX_TOKENS = Number.parseInt(process.env.DIFF_EXPLAIN_MAX_TOKENS || '3072', 10);
+
+const DIFF_EXPLAIN_SYSTEM_PROMPT = `你是 OpenSCAD 建模助手。用户会提供若干「代码差异块」，每块包含类型（replace/delete/insert）、是否采纳 AI（可能为预览占位），以及删/增的代码片段。
+这些说明会在用户勾选「是否采纳」之前展示，帮助用户理解每一块改动对模型的影响。
+请用简体中文为每一块写**一句**功能说明（40～120 字为宜）：这段改动会让 3D 模型或参数发生**什么变化**（几何、尺寸、布尔运算、模块/参数等）。不要复述大段代码，不要写 markdown。
+必须**只输出**一个 JSON 对象，格式严格为：{"explanations":["第1块说明","第2块说明",...]}。explanations 数组长度必须与输入块数量完全一致。`;
+
+function truncateForExplain(s: string, max: number): string {
+  if (s.length <= max) {
+    return s;
+  }
+  return `${s.slice(0, max)}\n…(已截断)`;
+}
+
+function normalizeExplanationList(parts: string[], expectedLen: number): string[] {
+  const cleaned = parts.map((p) => p.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const out: string[] = [];
+  for (let i = 0; i < expectedLen; i += 1) {
+    out.push(cleaned[i] || '（该块未能生成说明）');
+  }
+  return out;
+}
+
+function parseExplanationsJsonFromModel(text: string, expectedLen: number): string[] {
+  const trimmed = text.trim();
+  let jsonStr = trimmed;
+  const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fence) {
+    jsonStr = fence[1].trim();
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    throw new Error('模型输出不是合法 JSON');
+  }
+
+  let arr: unknown[];
+  if (Array.isArray(parsed)) {
+    arr = parsed;
+  } else if (
+    parsed &&
+    typeof parsed === 'object' &&
+    Array.isArray((parsed as { explanations?: unknown }).explanations)
+  ) {
+    arr = (parsed as { explanations: unknown[] }).explanations;
+  } else {
+    throw new Error('JSON 中缺少 explanations 数组');
+  }
+
+  const strings = arr.map((x) => (typeof x === 'string' ? x : String(x ?? '')));
+  return normalizeExplanationList(strings, expectedLen);
+}
+
+/**
+ * 调用 AI 为每个差异块生成一句中文功能说明（用于应用合并后的会话展示）。
+ */
+export async function explainOpenScadDiffBlocks(blocks: DiffExplainBlockInput[]): Promise<string[]> {
+  if (blocks.length === 0) {
+    return [];
+  }
+
+  const payload = {
+    blocks: blocks.map((b) => ({
+      index: b.index,
+      kind: b.kind,
+      adopted: b.adopted,
+      removed: b.removed ? truncateForExplain(b.removed, 12000) : undefined,
+      added: b.added ? truncateForExplain(b.added, 12000) : undefined,
+    })),
+  };
+
+  const userContent = [
+    `共 ${blocks.length} 个差异块，请按顺序生成 explanations。输入如下：`,
+    JSON.stringify(payload, null, 2),
+  ].join('\n');
+
+  const client = getKimiFixClient();
+  const response = await Promise.race([
+    client.chat.completions.create({
+      model: DIFF_EXPLAIN_MODEL,
+      messages: [
+        { role: 'system', content: DIFF_EXPLAIN_SYSTEM_PROMPT },
+        { role: 'user', content: userContent },
+      ],
+      max_tokens: Number.isFinite(DIFF_EXPLAIN_MAX_TOKENS) ? DIFF_EXPLAIN_MAX_TOKENS : 3072,
+      temperature: 0.25,
+    }),
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('差异块说明调用超时')), 120000);
+    }),
+  ]);
+
+  const text = response.choices[0]?.message?.content?.trim() || '';
+  if (!text) {
+    throw new Error('模型未返回说明文本');
+  }
+
+  return parseExplanationsJsonFromModel(text, blocks.length);
+}
+
+export async function generateProductBrief(prompt: string): Promise<string> {
   if (!PRODUCT_MANAGER_API_KEY) {
     throw new Error('未配置产品经理智能体 API Key（QN_API_KEY）');
   }
@@ -813,21 +959,21 @@ function extractParameters(code: string): Record<string, any> {
 
 /**
  * 检测输入中的 @提及 标记
- * 支持格式: @产品经理 / @PM | @老师傅 / @Master | @实习生 / @Intern
+ * 支持: @需求顾问 / 旧名 @产品经理 / @PM | @代码生成 / 旧名 @老师傅 | @代码助手 / 旧名 @实习生
  * @returns 返回角色名称，若没有 @提及 则返回 null
  */
 export function detectMention(input: string): 'product_manager' | 'master' | 'intern' | null {
   const normalizedInput = input.toLowerCase();
   
-  if (/@产品经理|@pm|@product.?manager|@小k/.test(normalizedInput)) {
+  if (/@需求顾问|@产品经理|@pm|@product.?manager|@小k/.test(normalizedInput)) {
     return 'product_manager';
   }
   
-  if (/@老师傅|@master|@craftsman/.test(normalizedInput)) {
+  if (/@代码生成|@老师傅|@master|@craftsman/.test(normalizedInput)) {
     return 'master';
   }
   
-  if (/@实习生|@intern|@apprentice/.test(normalizedInput)) {
+  if (/@代码助手|@实习生|@intern|@apprentice/.test(normalizedInput)) {
     return 'intern';
   }
   
@@ -852,7 +998,12 @@ export async function handleMentionedRoute(
   parameters?: Record<string, any>;
 }> {
   // 清理 @提及 标记
-  const cleanedInput = userInput.replace(/@产品经理|@PM|@pm|@product.?manager|@小k|@老师傅|@master|@craftsman|@实习生|@intern|@apprentice/gi, '').trim();
+  const cleanedInput = userInput
+    .replace(
+      /@需求顾问|@产品经理|@PM|@pm|@product.?manager|@小k|@代码生成|@老师傅|@master|@craftsman|@代码助手|@实习生|@intern|@apprentice/gi,
+      '',
+    )
+    .trim();
   
   switch (mention) {
     case 'product_manager': {

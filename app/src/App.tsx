@@ -1,8 +1,26 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { StateProvider, useAppState } from './modules/state-session/StateSession';
 import { PromptInput } from './modules/prompt-input/PromptInput';
 import { ParamPreviewCanvas, ParameterControls } from './modules/param-preview/ParamPreview';
 import { useScadWorkflow } from './hooks/useScadWorkflow';
+import { CodeDiffReview, type WorkspaceApplyMeta } from './modules/code-workspace/CodeDiffReview';
+import { fetchBlockExplainsBySegId } from './utils/pendingDiffExplain';
+
+/** 左侧会话只做轻量提醒：增删与块说明以右侧审阅区为准，避免与右栏重复一大段。 */
+function formatWorkspaceApplyChatMessage(meta: WorkspaceApplyMeta): string {
+  const sourceLabel =
+    meta.source === 'generate' ? '生成 / 修订' : meta.source === 'fix' ? '自动修复' : '对话注入代码';
+  const lines = [
+    '**已应用合并**',
+    '',
+    `来源：${sourceLabel} · 共 ${meta.totalBlocks} 块（采纳 AI ${meta.adoptedBlocks}，保留原文 ${meta.rejectedBlocks}）。`,
+    '详细差异与各块说明请在右侧「审阅」中查看；编辑器已更新并已触发重新编译。',
+  ];
+  if (meta.mergedEqualsBefore) {
+    lines.push('', '说明：合并结果与合并前一致，外观与参数可能无明显变化。');
+  }
+  return lines.join('\n');
+}
 
 interface SyntaxIssue {
   line: number;
@@ -301,6 +319,7 @@ const AppContent: React.FC = () => {
   const [csgTreeText, setCsgTreeText] = useState('');
   const [csgTreeError, setCsgTreeError] = useState<string | undefined>(undefined);
   const [lastCsgSourceKey, setLastCsgSourceKey] = useState('');
+  const [workspaceChatInjection, setWorkspaceChatInjection] = useState<{ key: number; text: string } | null>(null);
   const codeEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -324,7 +343,71 @@ const AppContent: React.FC = () => {
     handleExportSTL,
     handleViewCSGTree,
     handleDirectCode,
+    acceptPendingCode,
+    rejectPendingCode,
   } = useScadWorkflow({ state, dispatch });
+
+  useEffect(() => {
+    if (state.pendingCodeReview) {
+      setRightView('code');
+    }
+  }, [state.pendingCodeReview]);
+
+  const pendingReview = state.pendingCodeReview;
+  const blockActionsForPending = Boolean(pendingReview) || state.isLoading;
+
+  const pendingReviewRef = useRef(state.pendingCodeReview);
+  pendingReviewRef.current = state.pendingCodeReview;
+
+  const [pendingDiffAi, setPendingDiffAi] = useState<{
+    bySegId: Record<number, string>;
+    phase: 'idle' | 'loading' | 'done' | 'error';
+    fromApi?: boolean;
+  }>({ bySegId: {}, phase: 'idle' });
+
+  const pendingExplainRunRef = useRef(0);
+
+  const reviewFingerprint = useMemo(() => {
+    const p = state.pendingCodeReview;
+    if (!p) {
+      return '';
+    }
+    return `${p.previousCode}\n---FP---\n${p.proposedCode}`;
+  }, [state.pendingCodeReview?.previousCode, state.pendingCodeReview?.proposedCode]);
+
+  /** 自动修复/对话注入等未带 blockExplains 时，为右侧审阅区拉取各块说明（生成流程已在 handleGenerate 内写入 pending） */
+  useLayoutEffect(() => {
+    if (!reviewFingerprint) {
+      setPendingDiffAi({ bySegId: {}, phase: 'idle' });
+      return;
+    }
+    const p = pendingReviewRef.current;
+    if (!p) {
+      return;
+    }
+
+    if (p.blockExplainsBySegId !== undefined) {
+      setPendingDiffAi({
+        bySegId: p.blockExplainsBySegId,
+        phase: 'done',
+        fromApi: p.blockExplainsFromApi,
+      });
+      return;
+    }
+
+    const runId = ++pendingExplainRunRef.current;
+    setPendingDiffAi({ bySegId: {}, phase: 'loading' });
+
+    void fetchBlockExplainsBySegId(p.previousCode, p.proposedCode).then(({ bySegId, fromApi }) => {
+      if (pendingExplainRunRef.current !== runId) {
+        return;
+      }
+      if (!pendingReviewRef.current) {
+        return;
+      }
+      setPendingDiffAi({ bySegId, phase: 'done', fromApi });
+    });
+  }, [reviewFingerprint]);
 
   const openCSGView = useCallback(() => {
     setRightView('csg');
@@ -368,6 +451,9 @@ const AppContent: React.FC = () => {
               onDirectCode={handleDirectCode}
               isLoading={state.isLoading}
               progressTrail={state.aiProgressTrail}
+              sessionId={state.sessionId}
+              currentOpenscadCode={state.openscadCode}
+              workspaceChatInjection={workspaceChatInjection}
             />
           </div>
         </section>
@@ -411,7 +497,7 @@ const AppContent: React.FC = () => {
             {rightView === 'code' ? (
               <div className="code-panel">
                 <div className="code-panel-header">
-                  <h4>生成的 OpenSCAD 代码</h4>
+                  <h4>{pendingReview ? '审阅 AI 代码变更' : '生成的 OpenSCAD 代码'}</h4>
                   <div className="code-actions">
                     <button
                       type="button"
@@ -419,7 +505,7 @@ const AppContent: React.FC = () => {
                       onClick={() => {
                         void handleFix();
                       }}
-                      disabled={!state.openscadCode.trim() || state.isLoading}
+                      disabled={!state.openscadCode.trim() || blockActionsForPending}
                     >
                       自动修复
                     </button>
@@ -427,7 +513,7 @@ const AppContent: React.FC = () => {
                       type="button"
                       className="compile-now-button"
                       onClick={handleCompileNow}
-                      disabled={!state.openscadCode.trim() || state.isLoading}
+                      disabled={!state.openscadCode.trim() || blockActionsForPending}
                     >
                       立即编译
                     </button>
@@ -437,12 +523,39 @@ const AppContent: React.FC = () => {
                       onClick={() => {
                         void handleExportSTL();
                       }}
-                      disabled={!state.openscadCode.trim() || state.isLoading}
+                      disabled={!state.openscadCode.trim() || blockActionsForPending}
                     >
                       导出 STL
                     </button>
                   </div>
                 </div>
+                {pendingReview ? (
+                  <CodeDiffReview
+                    before={pendingReview.previousCode}
+                    after={pendingReview.proposedCode}
+                    source={pendingReview.source}
+                    aiBySegId={pendingDiffAi.bySegId}
+                    aiExplainPhase={pendingDiffAi.phase}
+                    explainsFromApi={pendingReview.blockExplainsFromApi ?? pendingDiffAi.fromApi}
+                    onApply={async (merged, meta) => {
+                      const ok = await acceptPendingCode(merged);
+                      if (ok) {
+                        setWorkspaceChatInjection({
+                          key: Date.now(),
+                          text: formatWorkspaceApplyChatMessage(meta),
+                        });
+                      } else {
+                        setWorkspaceChatInjection({
+                          key: Date.now(),
+                          text:
+                            '**未能应用合并**\n\n审阅状态已失效或已关闭，请重新生成代码后再试。（若按钮无响应，请确认当前没有在编译中。）',
+                        });
+                      }
+                    }}
+                    onDiscardAll={rejectPendingCode}
+                    disabled={state.isLoading}
+                  />
+                ) : (
                 <div className="code-editor-shell">
                   <div className="line-gutter" ref={gutterRef} aria-hidden="true">
                     {Array.from({ length: totalLines }).map((_, index) => {
@@ -519,8 +632,13 @@ const AppContent: React.FC = () => {
                     />
                   </div>
                 </div>
-                <p className="code-editor-tip">编辑代码后将自动同步参数控制并重新编译预览。按 Ctrl+Enter 可立即编译。</p>
-                {syntaxIssues.length > 0 && (
+                )}
+                <p className="code-editor-tip">
+                  {pendingReview
+                    ? '按「块」勾选是否采纳；可点「全部采纳 AI」或「全部保留原文」，最后「应用合并结果并编译」。'
+                    : '编辑代码后将自动同步参数控制并重新编译预览。按 Ctrl+Enter 可立即编译。'}
+                </p>
+                {!pendingReview && syntaxIssues.length > 0 && (
                   <div className="syntax-error-list" role="alert">
                     <h5>语法检查</h5>
                     <ul>
@@ -550,7 +668,7 @@ const AppContent: React.FC = () => {
                 onCloseError={handleCloseError}
                 onExportSTL={handleExportSTL}
                 hasCode={!!state.openscadCode.trim()}
-                isLoading={state.isLoading}
+                isLoading={state.isLoading || !!state.pendingCodeReview}
               />
             ) : rightView === 'parameters' ? (
               <div className="parameters-panel">
@@ -571,7 +689,7 @@ const AppContent: React.FC = () => {
                       setLastCsgSourceKey('');
                       openCSGView();
                     }}
-                    disabled={!state.openscadCode.trim() || state.isLoading}
+                    disabled={!state.openscadCode.trim() || blockActionsForPending}
                   >
                     刷新
                   </button>
