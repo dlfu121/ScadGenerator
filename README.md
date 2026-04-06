@@ -239,6 +239,9 @@ cp .env.example .env
 
 ```env
 QN_API_KEY=your_api_key_here
+
+##登录https://s.qiniu.com/2YzaMj，注册账户可获赠1000万词元，保证够用。
+
 QN_BASE_URL=https://api.qnaigc.com/v1
 # 可选：
 # PORT=5001
