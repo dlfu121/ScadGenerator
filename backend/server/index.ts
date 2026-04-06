@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { existsSync } from 'fs';
 import parametricChatRouter from '../routes/parametric-chat';
 import { createWebSocketServer } from '../services/websocket';
 
@@ -14,6 +16,15 @@ app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
 // 挂载参数化对话接口。
 app.use('/api/parametric-chat', parametricChatRouter);
+
+// 生产模式下托管前端构建产物（app/dist）。
+const clientDistPath = path.resolve(process.cwd(), 'app', 'dist');
+if (existsSync(clientDistPath)) {
+  app.use(express.static(clientDistPath));
+  app.get(/^(?!\/api).*/, (_, res) => {
+    res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+}
 
 // 启动 HTTP 服务。
 const server = app.listen(PORT, () => {

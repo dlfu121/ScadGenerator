@@ -23,6 +23,12 @@ interface ChatMessage {
   type?: 'text' | 'progress' | 'waiting' | 'spec'; // spec = 建模方案（参数与特点）
   isConfirmationMarker?: boolean;
   agentRole?: 'product_manager' | 'intern' | 'master'; // 智能体角色，用于显示对应头像
+  action?: 'confirm-first-generate';
+}
+
+interface PendingFirstGenerate {
+  promptText: string;
+  brief: string;
 }
 
 interface ConversationMessage {
@@ -41,6 +47,24 @@ interface RequirementConfirmResult {
   openscadCode?: string;
   parameters?: Record<string, any>;
 }
+
+interface RuntimeModels {
+  productManagerModel: string;
+  firstCodegenModel: string;
+  revisionCodegenModel: string;
+  codegenModel: string;
+  internModel: string;
+  kimiFixModel: string;
+}
+
+const DEFAULT_RUNTIME_MODELS: RuntimeModels = {
+  productManagerModel: 'moonshotai/kimi-k2.5',
+  firstCodegenModel: 'claude-4.5-sonnet',
+  revisionCodegenModel: 'claude-4.5-sonnet',
+  codegenModel: 'claude-4.5-sonnet',
+  internModel: 'deepseek/deepseek-v3.2-251201',
+  kimiFixModel: 'moonshotai/kimi-k2.5',
+};
 
 type SummonAgentRole = 'product_manager' | 'intern' | 'master';
 
@@ -103,6 +127,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const [confirmedRequirement, setConfirmedRequirement] = useState('');
   /** 与最近一次 design-spec 一致，修订时带给后端 */
   const [lastProductBrief, setLastProductBrief] = useState('');
+  /** 首次流程：方案已确认，等待用户点击按钮后再生成代码 */
+  const [pendingFirstGenerate, setPendingFirstGenerate] = useState<PendingFirstGenerate | null>(null);
   /** 当前正在响应的岗位（对话接口或生成链路），用于顶部按钮动画 */
   const [busyAgentRole, setBusyAgentRole] = useState<SummonAgentRole | null>(null);
 
@@ -112,8 +138,48 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const lastProgressCountRef = useRef<number>(0);
   const engineerProgressCursorRef = useRef<number>(0);
   const lastWorkspaceChatInjectKeyRef = useRef<number | null>(null);
+  const runtimeModelsRef = useRef<RuntimeModels>(DEFAULT_RUNTIME_MODELS);
 
   const makeTimestamp = () => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+
+  const fetchRuntimeModels = React.useCallback(async (): Promise<RuntimeModels> => {
+    try {
+      const response = await fetch('/api/parametric-chat/runtime-models', { method: 'GET' });
+      if (!response.ok) {
+        return runtimeModelsRef.current;
+      }
+
+      const json = (await response.json()) as Partial<RuntimeModels>;
+      const next: RuntimeModels = {
+        productManagerModel: typeof json.productManagerModel === 'string' && json.productManagerModel.trim()
+          ? json.productManagerModel.trim()
+          : runtimeModelsRef.current.productManagerModel,
+        firstCodegenModel: typeof json.firstCodegenModel === 'string' && json.firstCodegenModel.trim()
+          ? json.firstCodegenModel.trim()
+          : runtimeModelsRef.current.firstCodegenModel,
+        revisionCodegenModel: typeof json.revisionCodegenModel === 'string' && json.revisionCodegenModel.trim()
+          ? json.revisionCodegenModel.trim()
+          : runtimeModelsRef.current.revisionCodegenModel,
+        codegenModel: typeof json.codegenModel === 'string' && json.codegenModel.trim()
+          ? json.codegenModel.trim()
+          : runtimeModelsRef.current.codegenModel,
+        internModel: typeof json.internModel === 'string' && json.internModel.trim()
+          ? json.internModel.trim()
+          : runtimeModelsRef.current.internModel,
+        kimiFixModel: typeof json.kimiFixModel === 'string' && json.kimiFixModel.trim()
+          ? json.kimiFixModel.trim()
+          : runtimeModelsRef.current.kimiFixModel,
+      };
+
+      runtimeModelsRef.current = next;
+      return next;
+    } catch {
+      return runtimeModelsRef.current;
+    }
+  }, []);
+
+  const getModelWaitingText = (modelName: string) =>
+    `等待${modelName}模型...（请稍候，最长约 2 分钟，若超时请稍后重试）`;
 
   const insertSummonTag = (tag: string) => {
     setPrompt((prev) => (prev ? `${prev} ` : '') + tag);
@@ -206,6 +272,10 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   }, [messages]);
 
   useEffect(() => {
+    void fetchRuntimeModels();
+  }, [fetchRuntimeModels]);
+
+  useEffect(() => {
     if (!workspaceChatInjection?.text?.trim()) {
       return;
     }
@@ -294,7 +364,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
   // 处理需求确认对话
   const handleConfirmationChat = async (userInput: string) => {
-    setBusyAgentRole(detectLocalMentionRole(userInput) ?? 'product_manager');
+    const localMentionRole = detectLocalMentionRole(userInput);
+    setBusyAgentRole(localMentionRole ?? 'product_manager');
     const userMessage: ChatMessage = {
       id: `${Date.now()}_user`,
       role: 'user',
@@ -318,10 +389,18 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     setPrompt('');
 
     // 立即插入“等待回复”提醒，避免用户误以为没有响应
+    const runtimeModels = await fetchRuntimeModels();
+    const hasExistingCode = Boolean((currentOpenscadCode || '').trim());
+    const waitingContent = localMentionRole === 'master'
+      ? getModelWaitingText(hasExistingCode ? runtimeModels.revisionCodegenModel : runtimeModels.firstCodegenModel)
+      : localMentionRole === 'intern'
+        ? getModelWaitingText(runtimeModels.internModel)
+        : getModelWaitingText(runtimeModels.productManagerModel);
+
     const waitingMessage: ChatMessage = {
       id: pendingMessageId,
       role: 'assistant',
-      content: '正在等待助理回复...（请稍候，最长约 2 分钟，若超时请稍后重试）',
+      content: waitingContent,
       timestamp: makeTimestamp(),
       type: 'waiting',
     };
@@ -335,13 +414,14 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         body: JSON.stringify({
           userInput,
           conversationHistory: newConversationHistory,
+          currentOpenscadCode,
         }),
       });
 
       const result = await response.json() as RequirementConfirmResult;
 
       if (!response.ok) {
-        throw new Error(result?.error || '对话失败');
+        throw new Error(result?.error || result?.pmResponse || '对话失败');
       }
 
       // 检查是否有确认标记
@@ -424,7 +504,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       const errorText = error instanceof Error ? error.message : String(error);
       const rateLimitMessage = isRateLimitLike(errorText) ? buildRateLimitAnalysisMessage(errorText) : undefined;
       const timeoutMessage = isTimeoutLike(errorText) ? buildTimeoutAnalysisMessage(errorText) : undefined;
-      const finalMessage = rateLimitMessage || timeoutMessage || '❌ 对话出错，请重试。';
+      const finalMessage = rateLimitMessage || timeoutMessage || `❌ 对话出错：${errorText}`;
 
       const errorMessage: ChatMessage = {
         id: `${pendingMessageId}_error`,
@@ -442,21 +522,45 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
   // 需求确认完成后进行代码生成
   const handleGenerateAfterConfirmation = async (generationPrompt: string) => {
+    const pendingMessageId = `${Date.now()}_generate_pending`;
+    pendingMessageIdRef.current = pendingMessageId;
+
+    const runtimeModels = await fetchRuntimeModels();
+    const waitingMessage: ChatMessage = {
+      id: pendingMessageId,
+      role: 'assistant',
+      content: getModelWaitingText(runtimeModels.firstCodegenModel),
+      timestamp: makeTimestamp(),
+      type: 'waiting',
+    };
+    setMessages((prev) => [...prev, waitingMessage]);
+
     setBusyAgentRole('master');
     try {
       const generateResult = await onGenerate({ prompt: generationPrompt });
       setMessages((prev) => [
-        ...prev,
+        ...prev.filter((m) => m.id !== pendingMessageId),
         {
-          id: `${Date.now()}_generate_complete`,
+          id: `${pendingMessageId}_complete`,
           role: 'assistant',
           content: generateResult.fullResponse || (generateResult.success ? '✅ 模型生成完成！' : '❌ 模型生成失败，请重试。'),
           timestamp: makeTimestamp(),
           type: 'text',
         },
       ]);
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
+      const fallbackMessage: ChatMessage = {
+        id: `${pendingMessageId}_error`,
+        role: 'assistant',
+        content: `❌ 生成失败：${errorText}`,
+        timestamp: makeTimestamp(),
+        type: 'text',
+      };
+      setMessages((prev) => [...prev.filter((m) => m.id !== pendingMessageId), fallbackMessage]);
     } finally {
       setBusyAgentRole(null);
+      pendingMessageIdRef.current = null;
     }
   };
 
@@ -482,10 +586,12 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     setMessages((prev) => [...prev, userMessage]);
     setPrompt('');
 
+    const runtimeModels = await fetchRuntimeModels();
+
     const waitingMessage: ChatMessage = {
       id: pendingMessageId,
       role: 'assistant',
-      content: '正在按你的意见修订代码（沿用当前方案摘要与代码上下文）…',
+      content: getModelWaitingText(runtimeModels.revisionCodegenModel),
       timestamp: makeTimestamp(),
       type: 'waiting',
     };
@@ -527,6 +633,64 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     }
   };
 
+  // 首次流程：用户点击确认按钮后，才启动第一次代码生成
+  const handleConfirmFirstGenerate = async (confirmMessageId: string) => {
+    if (!pendingFirstGenerate) {
+      return;
+    }
+
+    const { promptText, brief } = pendingFirstGenerate;
+    setPendingFirstGenerate(null);
+
+    const pendingCode = `${Date.now()}_code_pending`;
+    pendingMessageIdRef.current = pendingCode;
+
+    const runtimeModels = await fetchRuntimeModels();
+
+    setMessages((prev) => [
+      ...prev.filter((m) => m.id !== confirmMessageId),
+      {
+        id: pendingCode,
+        role: 'assistant',
+        content: getModelWaitingText(runtimeModels.firstCodegenModel),
+        timestamp: makeTimestamp(),
+        type: 'waiting',
+      },
+    ]);
+
+    setBusyAgentRole('master');
+    try {
+      const generateResult = await onGenerate({ prompt: promptText, productBrief: brief });
+
+      const assistantMessage: ChatMessage = {
+        id: `${pendingCode}_response`,
+        role: 'assistant',
+        content:
+          generateResult.fullResponse
+          || (generateResult.success ? '✅ 代码已生成并尝试编译预览，可在右侧查看参数与预览。' : '❌ 生成失败，请重试。'),
+        timestamp: makeTimestamp(),
+        type: 'text',
+      };
+      setMessages((prev) => [...prev.filter((m) => m.id !== pendingCode), assistantMessage]);
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error);
+      const rateLimitMessage = isRateLimitLike(errorText) ? buildRateLimitAnalysisMessage(errorText) : undefined;
+      const timeoutMessage = isTimeoutLike(errorText) ? buildTimeoutAnalysisMessage(errorText) : undefined;
+      const finalMessage = rateLimitMessage || timeoutMessage || '❌ 处理失败，请重试。';
+      const errorMessage: ChatMessage = {
+        id: `${pendingCode}_error`,
+        role: 'assistant',
+        content: finalMessage,
+        timestamp: makeTimestamp(),
+        type: 'text',
+      };
+      setMessages((prev) => [...prev.filter((m) => m.id !== pendingCode), errorMessage]);
+    } finally {
+      setBusyAgentRole(null);
+      pendingMessageIdRef.current = null;
+    }
+  };
+
   // 首次建模：先拉取方案摘要（参数与特点）→ 展示 → 再生成代码（避免重复跑简报）
   const handlePlanThenGenerate = async (promptText: string) => {
     const userMessage: ChatMessage = {
@@ -539,16 +703,17 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
     const pendingAnalyze = `${Date.now()}_plan_pending`;
     const specMessageId = `${pendingAnalyze}_spec`;
-    let pendingCode: string | null = null;
     pendingMessageIdRef.current = pendingAnalyze;
 
     setMessages((prev) => [...prev, userMessage]);
     setPrompt('');
 
+    const runtimeModels = await fetchRuntimeModels();
+
     const waitingAnalyze: ChatMessage = {
       id: pendingAnalyze,
       role: 'assistant',
-      content: '正在解析需求：整理参数项、默认值与造型特点…',
+      content: getModelWaitingText(runtimeModels.productManagerModel),
       timestamp: makeTimestamp(),
       type: 'waiting',
     };
@@ -591,30 +756,17 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
       setMessages((prev) => [...prev.filter((m) => m.id !== pendingAnalyze), specMessage]);
 
-      pendingCode = `${Date.now()}_code_pending`;
-      pendingMessageIdRef.current = pendingCode;
-
-      const waitingCode: ChatMessage = {
-        id: pendingCode,
+      const confirmMessage: ChatMessage = {
+        id: `${pendingAnalyze}_confirm_first_codegen`,
         role: 'assistant',
-        content: '正在根据上述方案生成 OpenSCAD 示例代码并提取参数…（请稍候，最长约 2 分钟）',
-        timestamp: makeTimestamp(),
-        type: 'waiting',
-      };
-      setMessages((prev) => [...prev, waitingCode]);
-
-      const generateResult = await onGenerate({ prompt: promptText, productBrief: brief });
-
-      const assistantMessage: ChatMessage = {
-        id: `${pendingCode}_response`,
-        role: 'assistant',
-        content:
-          generateResult.fullResponse
-          || (generateResult.success ? '✅ 代码已生成并尝试编译预览，可在右侧查看参数与预览。' : '❌ 生成失败，请重试。'),
+        content: '方案已准备完成。点击下方按钮确认后，再开始第一次代码生成。',
         timestamp: makeTimestamp(),
         type: 'text',
+        action: 'confirm-first-generate',
       };
-      setMessages((prev) => [...prev.filter((m) => m.id !== pendingCode), assistantMessage]);
+
+      setPendingFirstGenerate({ promptText, brief });
+      setMessages((prev) => [...prev, confirmMessage]);
     } catch (error) {
       const errorText = error instanceof Error ? error.message : String(error);
       const rateLimitMessage = isRateLimitLike(errorText) ? buildRateLimitAnalysisMessage(errorText) : undefined;
@@ -632,7 +784,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
           (m) =>
             m.id !== pendingAnalyze &&
             m.id !== specMessageId &&
-            (!pendingCode || (m.id !== pendingCode && m.id !== `${pendingCode}_response`)),
+            m.id !== `${pendingAnalyze}_confirm_first_codegen`,
         ),
         errorMessage,
       ]);
@@ -692,6 +844,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     setIsConfirmingMode(false);
     setConfirmedRequirement('');
     setLastProductBrief('');
+    setPendingFirstGenerate(null);
     engineerProgressCursorRef.current = progressTrail.length;
   };
 
@@ -809,6 +962,20 @@ export const PromptInput: React.FC<PromptInputProps> = ({
                 </div>
                 {message.type !== 'progress' && (
                   <div className="message-meta">{message.timestamp}</div>
+                )}
+                {message.action === 'confirm-first-generate' && (
+                  <div className="confirm-generate-row">
+                    <button
+                      type="button"
+                      className="confirm-generate-btn"
+                      disabled={isLoading || !pendingFirstGenerate}
+                      onClick={() => {
+                        void handleConfirmFirstGenerate(message.id);
+                      }}
+                    >
+                      确认并生成代码
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -1424,6 +1591,35 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
         .message-item.waiting .message-meta {
           display: none;
+        }
+
+        .confirm-generate-row {
+          margin-top: 8px;
+        }
+
+        .confirm-generate-btn {
+          border: 1px solid #58a9df;
+          background: linear-gradient(135deg, #1c7fca 0%, #3a9ee4 100%);
+          color: #f7fbff;
+          border-radius: 10px;
+          padding: 7px 12px;
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+          box-shadow: 0 5px 14px rgba(28, 127, 202, 0.22);
+        }
+
+        .confirm-generate-btn:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: 0 7px 16px rgba(28, 127, 202, 0.3);
+        }
+
+        .confirm-generate-btn:disabled {
+          cursor: not-allowed;
+          opacity: 0.55;
+          transform: none;
+          box-shadow: none;
         }
 
         .input-form {

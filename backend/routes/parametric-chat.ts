@@ -8,6 +8,7 @@ import {
   handleMentionedRoute,
   generateProductBrief,
   explainOpenScadDiffBlocks,
+  getRuntimeModelConfig,
   type GenerateOpenSCADOptions,
   type DiffExplainBlockInput,
 } from '../services/ai-service';
@@ -52,7 +53,20 @@ interface FixRequestBody {
   sessionId?: string;
 }
 
+interface RuntimeModelsResponse {
+  productManagerModel: string;
+  firstCodegenModel: string;
+  revisionCodegenModel: string;
+  codegenModel: string;
+  internModel: string;
+  kimiFixModel: string;
+}
+
 const router = Router();
+
+router.get('/runtime-models', (_req: Request, res: Response<RuntimeModelsResponse>) => {
+  res.json(getRuntimeModelConfig());
+});
 
 function readCodePayload(input: unknown): string {
   return typeof input === 'string' ? input : '';
@@ -352,6 +366,7 @@ interface RequirementConfirmationResponse {
   sessionId?: string;
   openscadCode?: string;
   parameters?: Record<string, any>;
+  error?: string;
 }
 
 router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfirmationRequest>, res: Response<RequirementConfirmationResponse>) => {
@@ -371,7 +386,7 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
     // 【新增】检测 @提及 标记，优先处理 @实习生 和 @老师傅
     const mentionedRole = detectMention(userInput);
     if (mentionedRole) {
-      const mentionedResult = await handleMentionedRoute(mentionedRole, userInput, conversationHistory);
+      const mentionedResult = await handleMentionedRoute(mentionedRole, userInput, conversationHistory, req.body.currentOpenscadCode);
       
       // 通过 WebSocket 发送进度事件
       if (sessionId) {
@@ -422,8 +437,10 @@ router.post('/confirm-requirement', async (req: Request<{}, {}, RequirementConfi
     });
   } catch (error) {
     console.error('需求确认错误:', error);
+    const message = error instanceof Error ? error.message : '产品经理产生了错误';
     res.status(500).json({
-      pmResponse: error instanceof Error ? error.message : '产品经理产生了错误',
+      pmResponse: `❌ ${message}`,
+      error: message,
       isNeedMoreInfo: true,
       isClear: false,
       shouldGenerate: false,

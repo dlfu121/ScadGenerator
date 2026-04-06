@@ -8,8 +8,10 @@ import {
   buildFixUserPrompt,
   PRODUCT_MANAGER_DIALOG_SYSTEM_PROMPT,
   buildProductManagerDialogUserPrompt,
+  buildProductManagerDialogUserPromptWithCode,
   buildCodeResponderSystemPrompt,
   buildCodeResponderUserPrompt,
+  buildCodeResponderUserPromptWithExistingCode,
   PRODUCT_BRIEF_SYSTEM_PROMPT,
   buildProductBriefUserPrompt,
   buildRevisionCodegenUserPrompt,
@@ -18,15 +20,25 @@ import {
 // 用于 OpenSCAD 代码生成的模型配置（支持 claude-4.5-sonnet）
 const CLAUDE_API_KEY = process.env.QN_API_KEY;
 const CLAUDE_BASE_URL = process.env.QINIU_DEEPSEEK_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
-const OPENSCAD_MODEL = process.env.QINIU_DEEPSEEK_MODEL || process.env.OPENSCAD_MODEL || 'claude-4.5-sonnet';
+const OPENSCAD_MODEL = process.env.OPENSCAD_MODEL || process.env.QINIU_DEEPSEEK_MODEL || 'claude-4.5-sonnet';
 const OPENSCAD_API_PROTOCOL = (process.env.OPENSCAD_API_PROTOCOL || 'anthropic-messages').trim().toLowerCase();
 const OPENSCAD_API_PATH = process.env.OPENSCAD_API_PATH || '/messages';
 const OPENSCAD_MAX_TOKENS = Number.parseInt(process.env.OPENSCAD_MAX_TOKENS || '1024', 10);
 const OPENSCAD_CHAT_MAX_TOKENS = Number.parseInt(process.env.OPENSCAD_CHAT_MAX_TOKENS || '4096', 10);
 const OPENSCAD_FIX_TIMEOUT_MS = Number.parseInt(process.env.OPENSCAD_FIX_TIMEOUT_MS || '240000', 10);
 
+// 首次代码生成（Kimi 确认需求后的第一次代码生成）默认使用 Claude Sonnet 4.5。
+// 可通过 .env 的 FIRST_CODEGEN_* 自定义“智能体种类/模型/协议”。
+const FIRST_CODEGEN_AGENT_TYPE = (process.env.FIRST_CODEGEN_AGENT_TYPE || 'claude').trim().toLowerCase();
+const FIRST_CODEGEN_MODEL = process.env.FIRST_CODEGEN_MODEL
+  || (FIRST_CODEGEN_AGENT_TYPE === 'deepseek'
+    ? (process.env.INTERN_MODEL || process.env.QINIU_DEEPSEEK_MODEL || 'deepseek/deepseek-v3.2-251201')
+    : 'claude-4.5-sonnet');
+const FIRST_CODEGEN_API_PROTOCOL = (process.env.FIRST_CODEGEN_API_PROTOCOL || 'anthropic-messages').trim().toLowerCase();
+const FIRST_CODEGEN_API_PATH = process.env.FIRST_CODEGEN_API_PATH || '/messages';
+
 // 用于实习生（代码问题咨询 + 代码修复）的统一模型配置
-const DEEPSEEK_API_KEY = process.env.QINIU_DEEPSEEK_API_KEY || process.env.QN_API_KEY;
+const DEEPSEEK_API_KEY = process.env.QN_API_KEY;
 const DEEPSEEK_BASE_URL = process.env.QINIU_DEEPSEEK_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
 const INTERN_MODEL = process.env.INTERN_MODEL || process.env.QINIU_DEEPSEEK_MODEL || 'deepseek/deepseek-v3.2-251201';
 const INTERN_MAX_TOKENS = Number.parseInt(process.env.INTERN_MAX_TOKENS || '1536', 10);
@@ -41,7 +53,7 @@ const PRODUCT_MANAGER_MAX_TOKENS = Number.parseInt(process.env.PM_MAX_TOKENS || 
 const PRODUCT_MANAGER_API_PROTOCOL = (process.env.PM_API_PROTOCOL || 'openai-compatible').trim().toLowerCase();
 
 // 修复兜底模型：仅用于 /fix 链路失败后的二次修复，不走产品经理逻辑。
-const KIMI_FIX_API_KEY = process.env.KIMI_FIX_API_KEY || process.env.QN_API_KEY;
+const KIMI_FIX_API_KEY = process.env.QN_API_KEY;
 const KIMI_FIX_BASE_URL = process.env.KIMI_FIX_BASE_URL || process.env.QN_BASE_URL || 'https://api.qnaigc.com/v1';
 const KIMI_FIX_MODEL = process.env.KIMI_FIX_MODEL || 'moonshotai/kimi-k2.5';
 
@@ -68,7 +80,7 @@ function getClaudeClient(): OpenAI {
 
 function getDeepseekClient(): OpenAI {
   if (!DEEPSEEK_API_KEY) {
-    throw new Error('未配置 DeepSeek API Key（QINIU_DEEPSEEK_API_KEY 或 QN_API_KEY）');
+    throw new Error('未配置 DeepSeek API Key（QN_API_KEY）');
   }
 
   if (!deepseekClient) {
@@ -100,7 +112,7 @@ function getProductManagerClient(): OpenAI {
 
 function getKimiFixClient(): OpenAI {
   if (!KIMI_FIX_API_KEY) {
-    throw new Error('未配置 Kimi 修复 API Key（KIMI_FIX_API_KEY 或 QN_API_KEY）');
+    throw new Error('未配置 Kimi 修复 API Key（QN_API_KEY）');
   }
 
   if (!kimiFixClient) {
@@ -190,6 +202,9 @@ export async function generateOpenSCAD(
   let productBrief = '';
   const revisionBase = options?.baseOpenscadCode?.trim() || '';
   const isRevision = Boolean(revisionBase);
+  const activeCodegenModel = isRevision ? OPENSCAD_MODEL : FIRST_CODEGEN_MODEL;
+  const activeCodegenProtocol = isRevision ? OPENSCAD_API_PROTOCOL : FIRST_CODEGEN_API_PROTOCOL;
+  const activeCodegenPath = isRevision ? OPENSCAD_API_PATH : FIRST_CODEGEN_API_PATH;
 
   try {
     const claude = getClaudeClient();
@@ -235,9 +250,10 @@ export async function generateOpenSCAD(
     reportProgress?.({
       stage: 'code_start',
       message: isRevision ? '正在整合修改并生成完整代码…' : '已收到需求，我来帮你把这个设计变成代码，稍等片刻...',
+      meta: { model: activeCodegenModel },
     });
     
-    if (OPENSCAD_API_PROTOCOL === 'anthropic-messages') {
+    if (activeCodegenProtocol === 'anthropic-messages') {
       const claudeApiKey = CLAUDE_API_KEY;
       if (!claudeApiKey) {
         throw new Error('未配置 Claude API Key（QN_API_KEY）');
@@ -246,8 +262,8 @@ export async function generateOpenSCAD(
       rawModelOutput = await callMessagesApi({
         apiKey: claudeApiKey,
         baseUrl: CLAUDE_BASE_URL,
-        apiPath: OPENSCAD_API_PATH,
-        model: OPENSCAD_MODEL,
+        apiPath: activeCodegenPath,
+        model: activeCodegenModel,
         maxTokens: OPENSCAD_CHAT_MAX_TOKENS,
         systemPrompt,
         userPrompt: deepseekPrompt,
@@ -256,7 +272,7 @@ export async function generateOpenSCAD(
     } else {
       const response = await Promise.race([
         claude.chat.completions.create({
-          model: OPENSCAD_MODEL,
+          model: activeCodegenModel,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: deepseekPrompt }
@@ -274,7 +290,7 @@ export async function generateOpenSCAD(
     reportProgress?.({
       stage: 'code_done',
       message: '代码已生成，正在清洗与提取参数',
-      meta: { outputLength: rawModelOutput.length }
+      meta: { outputLength: rawModelOutput.length, model: activeCodegenModel }
     });
 
     const result = buildGenerateResult(rawModelOutput, sessionId, productBrief);
@@ -292,7 +308,7 @@ export async function generateOpenSCAD(
       : undefined;
 
     reportProgress?.({ stage: 'error', message: `生成阶段失败：${message}` });
-    console.error('Claude API 代码生成失败:', message);
+    console.error('AI 代码生成失败:', message);
     throw new GenerateOpenSCADFailure(message, fallbackResult);
   }
 }
@@ -394,7 +410,7 @@ function buildGenerateResult(rawModelOutput: string, sessionId?: string, product
 }
 
 // 与产品经理进行多轮对话来确认需求
-export async function askProductManager(userInput: string, conversationHistory: ConversationMessage[] = []): Promise<{
+export async function askProductManager(userInput: string, conversationHistory: ConversationMessage[] = [], currentCode?: string): Promise<{
   response: string;
   isNeedMoreInfo: boolean;
   isClear: boolean;
@@ -444,7 +460,9 @@ export async function askProductManager(userInput: string, conversationHistory: 
       model: PRODUCT_MANAGER_MODEL,
       maxTokens: PRODUCT_MANAGER_MAX_TOKENS * 2,
       systemPrompt,
-      userPrompt: buildProductManagerDialogUserPrompt(conversationText),
+      userPrompt: currentCode && currentCode.trim()
+        ? buildProductManagerDialogUserPromptWithCode(conversationText, currentCode)
+        : buildProductManagerDialogUserPrompt(conversationText),
       temperature: 0.5,
     });
 
@@ -465,16 +483,28 @@ export async function askProductManager(userInput: string, conversationHistory: 
   }
 
   const pmClient = getProductManagerClient();
+  
+  // 如果有现有代码，在最后一条用户消息中追加代码信息
+  const finalMessages = currentCode && currentCode.trim()
+    ? [
+        ...messages.map(msg => ({
+          role: msg.role,
+          content: msg.content,
+        })),
+        { role: 'user', content: `【当前关联代码】\n${currentCode.trim()}\n\n请基于此代码理解修改意见。` },
+      ]
+    : messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+  
   const response = await Promise.race([
     pmClient.chat.completions.create({
       model: PRODUCT_MANAGER_MODEL,
       messages: [
         { role: 'system', content: systemPrompt },
-        ...messages.map(msg => ({
-          role: msg.role,
-          content: msg.content,
-        })),
-      ],
+        ...finalMessages,
+      ] as any,
       max_tokens: Number.isFinite(PRODUCT_MANAGER_MAX_TOKENS * 2) ? PRODUCT_MANAGER_MAX_TOKENS * 2 : 2048,
       temperature: 0.5,
     }),
@@ -503,12 +533,15 @@ export async function askProductManager(userInput: string, conversationHistory: 
 async function askCodeResponder(
   role: CodeResponderRole,
   userInput: string,
-  conversationHistory: ConversationMessage[]
+  conversationHistory: ConversationMessage[],
+  currentCode?: string
 ): Promise<string> {
   const conversationText = buildConversationText(conversationHistory, userInput);
   const roleName = role === 'master' ? '老师傅' : '实习生';
   const systemPrompt = buildCodeResponderSystemPrompt(roleName);
-  const codeResponderUserPrompt = buildCodeResponderUserPrompt(roleName, conversationText);
+  const codeResponderUserPrompt = currentCode && currentCode.trim()
+    ? buildCodeResponderUserPromptWithExistingCode(roleName, conversationText, currentCode)
+    : buildCodeResponderUserPrompt(roleName, conversationText);
 
   if (role === 'intern') {
     const deepseek = getDeepseekClient();
@@ -693,6 +726,27 @@ export interface DiffExplainBlockInput {
 
 const DIFF_EXPLAIN_MODEL = process.env.DIFF_EXPLAIN_MODEL || process.env.KIMI_FIX_MODEL || 'moonshotai/kimi-k2.5';
 const DIFF_EXPLAIN_MAX_TOKENS = Number.parseInt(process.env.DIFF_EXPLAIN_MAX_TOKENS || '3072', 10);
+
+export interface RuntimeModelConfig {
+  productManagerModel: string;
+  firstCodegenModel: string;
+  revisionCodegenModel: string;
+  codegenModel: string;
+  internModel: string;
+  kimiFixModel: string;
+}
+
+export function getRuntimeModelConfig(): RuntimeModelConfig {
+  return {
+    productManagerModel: PRODUCT_MANAGER_MODEL,
+    firstCodegenModel: FIRST_CODEGEN_MODEL,
+    revisionCodegenModel: OPENSCAD_MODEL,
+    // 为兼容历史前端字段，codegenModel 指向修订/后续代码生成模型。
+    codegenModel: OPENSCAD_MODEL,
+    internModel: INTERN_MODEL,
+    kimiFixModel: KIMI_FIX_MODEL,
+  };
+}
 
 const DIFF_EXPLAIN_SYSTEM_PROMPT = `你是 OpenSCAD 建模助手。用户会提供若干「代码差异块」，每块包含类型（replace/delete/insert）、是否采纳 AI（可能为预览占位），以及删/增的代码片段。
 这些说明会在用户勾选「是否采纳」之前展示，帮助用户理解每一块改动对模型的影响。
@@ -985,11 +1039,13 @@ export function detectMention(input: string): 'product_manager' | 'master' | 'in
  * @param mention 角色类型
  * @param userInput 用户输入
  * @param conversationHistory 对话历史
+ * @param currentCode 当前代码编辑区的代码
  */
 export async function handleMentionedRoute(
   mention: 'product_manager' | 'master' | 'intern',
   userInput: string,
-  conversationHistory: ConversationMessage[] = []
+  conversationHistory: ConversationMessage[] = [],
+  currentCode?: string
 ): Promise<{
   response: string;
   mentionedRole: 'product_manager' | 'master' | 'intern';
@@ -1008,7 +1064,7 @@ export async function handleMentionedRoute(
   switch (mention) {
     case 'product_manager': {
       // 直接调用产品经理
-      const result = await askProductManager(cleanedInput, conversationHistory);
+      const result = await askProductManager(cleanedInput, conversationHistory, currentCode);
       return {
         response: result.response,
         mentionedRole: 'product_manager',
@@ -1016,10 +1072,23 @@ export async function handleMentionedRoute(
       };
     }
     
-    case 'master':
+    case 'master': {
+      // 调用老师傅进行代码生成：优先使用现有代码的修改路径
+      const generateResult = await generateOpenSCAD(cleanedInput, undefined, undefined, {
+        baseOpenscadCode: currentCode,
+      });
+      return {
+        response: generateResult.openscadCode,
+        mentionedRole: 'master',
+        responderRole: 'master',
+        openscadCode: generateResult.openscadCode,
+        parameters: generateResult.parameters,
+      };
+    }
+    
     case 'intern': {
-      // 直接调用老师傅或实习生处理代码问题
-      const response = await askCodeResponder(mention, cleanedInput, conversationHistory);
+      // 直接调用实习生处理代码问题
+      const response = await askCodeResponder('intern', cleanedInput, conversationHistory, currentCode);
       
       // 提取代码和参数
       const extractedCode = response.trim();
