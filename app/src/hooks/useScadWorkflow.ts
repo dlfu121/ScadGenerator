@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import type { Dispatch } from 'react';
 import type { AppAction, AppState } from '../modules/state-session/StateSession';
+import { buildGenerateReadyFullResponse, fetchBlockExplainsBySegId } from '../utils/pendingDiffExplain';
 
 type AppDispatch = Dispatch<AppAction>;
 
@@ -18,6 +19,21 @@ interface CSGTreeResult {
 export interface GenerateChatResult {
   success: boolean;
   fullResponse: string;
+}
+
+export interface GenerateRequestPayload {
+  prompt: string;
+  /** 与 /design-spec 一致的前置摘要；传入（含空串）可避免服务端重复跑简报 */
+  productBrief?: string;
+  /** 有值时表示在现有代码上按 prompt 修订 */
+  baseOpenscadCode?: string;
+}
+
+function normalizeGenerateInput(input: string | GenerateRequestPayload): GenerateRequestPayload {
+  if (typeof input === 'string') {
+    return { prompt: input };
+  }
+  return input;
 }
 
 function parseScalarValue(rawValue: string): string | number | boolean {
@@ -220,12 +236,54 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     }
   }, [dispatch]);
 
-  const handleGenerate = useCallback(async (prompt: string): Promise<GenerateChatResult> => {
+  const acceptPendingCode = useCallback(async (mergedCode?: string): Promise<boolean> => {
+    const pending = stateRef.current.pendingCodeReview;
+    if (!pending) {
+      dispatch({
+        type: 'ADD_AI_PROGRESS',
+        payload: '未能应用合并：审阅已结束或已失效，请重新生成代码后再试。',
+      });
+      dispatch({
+        type: 'SET_COMPILE_MESSAGE',
+        payload: '未能应用合并（审阅已失效）',
+      });
+      return false;
+    }
+
+    const finalCode = mergedCode !== undefined ? mergedCode : pending.proposedCode;
+    const extracted = extractTopLevelParameters(finalCode);
+    const params =
+      Object.keys(extracted).length > 0 ? extracted : pending.proposedParameters;
+
+    dispatch({ type: 'SET_OPENSCAD_CODE', payload: finalCode });
+    dispatch({ type: 'SET_PARAMETERS', payload: params });
+    dispatch({ type: 'CLEAR_PENDING_CODE_REVIEW' });
+    await compileModel(finalCode, params);
+    return true;
+  }, [compileModel, dispatch]);
+
+  const rejectPendingCode = useCallback(() => {
+    dispatch({ type: 'CLEAR_PENDING_CODE_REVIEW' });
+    dispatch({ type: 'SET_COMPILE_MESSAGE', payload: '已放弃本次 AI 代码，保留编辑器中的当前版本' });
+  }, [dispatch]);
+
+  const handleGenerate = useCallback(async (input: string | GenerateRequestPayload): Promise<GenerateChatResult> => {
+    const { prompt, productBrief, baseOpenscadCode } = normalizeGenerateInput(input);
+    const isRevision = Boolean(baseOpenscadCode?.trim());
+
+    dispatch({ type: 'CLEAR_PENDING_CODE_REVIEW' });
     dispatch({ type: 'CLEAR_AI_PROGRESS' });
-    dispatch({ type: 'ADD_AI_PROGRESS', payload: '请求已发送，正在连接模型服务（请稍候，最长约 2 分钟；若超时请稍后重试）' });
+    dispatch({
+      type: 'ADD_AI_PROGRESS',
+      payload: isRevision
+        ? '正在根据修改意见更新模型代码（请稍候，最长约 2 分钟；若超时请稍后重试）'
+        : '请求已发送，正在生成参数化代码（请稍候，最长约 2 分钟；若超时请稍后重试）',
+    });
     dispatch({ type: 'SET_PROMPT', payload: prompt });
     dispatch({ type: 'SET_LOADING', payload: true });
     dispatch({ type: 'SET_ERROR', payload: undefined });
+
+    const snapshotBefore = stateRef.current.openscadCode;
 
     try {
       const response = await fetch('/api/parametric-chat', {
@@ -234,18 +292,12 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
         body: JSON.stringify({
           prompt,
           sessionId: state.sessionId,
+          ...(productBrief !== undefined ? { productBrief } : {}),
+          ...(baseOpenscadCode?.trim() ? { baseOpenscadCode: baseOpenscadCode.trim() } : {}),
         }),
       });
 
       const result = await response.json().catch(() => null);
-
-      if (result && Object.prototype.hasOwnProperty.call(result, 'openscadCode')) {
-        dispatch({ type: 'SET_OPENSCAD_CODE', payload: result.openscadCode });
-      }
-
-      if (result && Object.prototype.hasOwnProperty.call(result, 'parameters') && typeof result.parameters === 'object') {
-        dispatch({ type: 'SET_PARAMETERS', payload: result.parameters });
-      }
 
       if (result?.sessionId) {
         dispatch({ type: 'SET_SESSION_ID', payload: result.sessionId });
@@ -255,25 +307,48 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
         throw new Error(result?.error || '生成失败');
       }
 
-      if (typeof result?.productBrief === 'string' && result.productBrief.trim()) {
+      const proposedRaw = typeof result?.openscadCode === 'string' ? result.openscadCode : '';
+      if (!proposedRaw.trim()) {
+        dispatch({ type: 'SET_LOADING', payload: false });
+        return {
+          success: false,
+          fullResponse: '生成未返回有效代码。',
+        };
+      }
+
+      if (!isRevision && typeof result?.productBrief === 'string' && result.productBrief.trim()) {
         dispatch({ type: 'ADD_AI_PROGRESS', payload: '推理摘要已完成，正在整理可编译代码' });
       }
 
-      dispatch({ type: 'ADD_AI_PROGRESS', payload: '代码生成完成，准备编译预览' });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '代码已生成，正在分析各修改块功能说明…' });
 
-      await compileModel(result.compilableCode || result.openscadCode, result.parameters);
+      const compilable =
+        typeof result?.compilableCode === 'string' && result.compilableCode.trim()
+          ? result.compilableCode
+          : proposedRaw;
+      const proposedParameters =
+        result && Object.prototype.hasOwnProperty.call(result, 'parameters') && typeof result.parameters === 'object'
+          ? result.parameters
+          : {};
 
-      const productBrief = typeof result?.productBrief === 'string' ? result.productBrief.trim() : '';
-      const generatedCode = typeof result?.openscadCode === 'string' ? result.openscadCode.trim() : '';
-      const fullResponse = productBrief
-        ? [
-          '产品经理方案：',
-          productBrief,
-          '',
-          '模型生成的 OpenSCAD 代码：',
-          generatedCode || '（未返回代码）',
-        ].join('\n')
-        : (generatedCode || '模型生成成功，但未返回可展示文本。');
+      const { bySegId, fromApi, segments } = await fetchBlockExplainsBySegId(snapshotBefore, proposedRaw);
+
+      dispatch({
+        type: 'SET_PENDING_CODE_REVIEW',
+        payload: {
+          previousCode: snapshotBefore,
+          proposedCode: proposedRaw,
+          compilableCode: compilable,
+          proposedParameters,
+          source: 'generate',
+          blockExplainsBySegId: bySegId,
+          blockExplainsFromApi: fromApi,
+        },
+      });
+
+      dispatch({ type: 'SET_LOADING', payload: false });
+
+      const fullResponse = buildGenerateReadyFullResponse(segments, bySegId, fromApi);
 
       return {
         success: true,
@@ -383,11 +458,14 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
       return;
     }
 
+    dispatch({ type: 'CLEAR_PENDING_CODE_REVIEW' });
     pushEngineerEvent('start', '实习生已接手修复，我先快速过一遍当前代码和报错。');
     dispatch({ type: 'SET_LOADING', payload: true });
     dispatch({ type: 'SET_ERROR', payload: undefined });
     dispatch({ type: 'SET_COMPILE_MESSAGE', payload: 'AI 正在修复代码' });
     pushEngineerEvent('analysis', '正在定位问题根因，准备生成最小修改补丁。');
+
+    const snapshotBefore = currentCode;
 
     try {
       const response = await fetch('/api/parametric-chat/fix', {
@@ -411,23 +489,34 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
         throw new Error('自动修复未返回有效代码');
       }
 
-      pushEngineerEvent('patch', '修复补丁已生成，正在回填代码并进行编译验证。');
-      dispatch({ type: 'SET_OPENSCAD_CODE', payload: fixedCode });
+      pushEngineerEvent('patch', '修复结果已生成，请在右侧代码区查看差异并选择保留或放弃。');
 
-      if (result && Object.prototype.hasOwnProperty.call(result, 'parameters') && typeof result.parameters === 'object') {
-        dispatch({ type: 'SET_PARAMETERS', payload: result.parameters });
-      }
+      const compilable =
+        typeof result?.compilableCode === 'string' && result.compilableCode.trim()
+          ? result.compilableCode
+          : fixedCode;
+      const proposedParameters =
+        result && Object.prototype.hasOwnProperty.call(result, 'parameters') && typeof result.parameters === 'object'
+          ? result.parameters
+          : stateRef.current.parameters;
 
       if (result?.sessionId) {
         dispatch({ type: 'SET_SESSION_ID', payload: result.sessionId });
       }
 
-      const parametersForCompile = result?.parameters && typeof result.parameters === 'object'
-        ? result.parameters
-        : stateRef.current.parameters;
+      dispatch({
+        type: 'SET_PENDING_CODE_REVIEW',
+        payload: {
+          previousCode: snapshotBefore,
+          proposedCode: fixedCode,
+          compilableCode: compilable,
+          proposedParameters,
+          source: 'fix',
+        },
+      });
 
-      await compileModel(result.compilableCode || fixedCode, parametersForCompile);
-      pushEngineerEvent('done', '实习生修复完成并已重新编译，你可以继续预览或微调参数。');
+      dispatch({ type: 'SET_LOADING', payload: false });
+      pushEngineerEvent('done', '请在右侧确认变更后再编译预览。');
     } catch (error) {
       const message = error instanceof Error ? error.message : '自动修复失败';
       pushEngineerEvent('failed', `这次修复没能成功：${message}。建议你调整代码后再点一次修复。`);
@@ -539,41 +628,40 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
   }, [dispatch]);
 
   const handleDirectCode = useCallback(async (code: string, parameters?: Record<string, any>) => {
+    dispatch({ type: 'CLEAR_PENDING_CODE_REVIEW' });
     dispatch({ type: 'CLEAR_AI_PROGRESS' });
-    dispatch({ type: 'ADD_AI_PROGRESS', payload: '已接收代码，正在提取参数' });
+    dispatch({ type: 'ADD_AI_PROGRESS', payload: '已接收代码，正在准备审阅' });
     dispatch({ type: 'SET_LOADING', payload: true });
     dispatch({ type: 'SET_ERROR', payload: undefined });
 
+    const snapshotBefore = stateRef.current.openscadCode;
+
     try {
-      // 直接设置代码
-      dispatch({ type: 'SET_OPENSCAD_CODE', payload: code });
+      const proposedParameters =
+        parameters && Object.keys(parameters).length > 0
+          ? parameters
+          : extractTopLevelParameters(code);
 
-      // 设置参数或自动提取参数
-      if (parameters && Object.keys(parameters).length > 0) {
-        dispatch({ type: 'SET_PARAMETERS', payload: parameters });
-      } else {
-        const extractedParams = extractTopLevelParameters(code);
-        if (Object.keys(extractedParams).length > 0) {
-          dispatch({ type: 'SET_PARAMETERS', payload: extractedParams });
-        }
-      }
+      dispatch({
+        type: 'SET_PENDING_CODE_REVIEW',
+        payload: {
+          previousCode: snapshotBefore,
+          proposedCode: code,
+          compilableCode: code,
+          proposedParameters,
+          source: 'direct',
+        },
+      });
 
-      dispatch({ type: 'ADD_AI_PROGRESS', payload: '代码已设置，准备编译预览' });
-
-      // 编译模型
-      const paramsForCompile = parameters && Object.keys(parameters).length > 0
-        ? parameters
-        : extractTopLevelParameters(code);
-      await compileModel(code, paramsForCompile);
-
-      dispatch({ type: 'ADD_AI_PROGRESS', payload: '编译完成' });
+      dispatch({ type: 'SET_LOADING', payload: false });
+      dispatch({ type: 'ADD_AI_PROGRESS', payload: '请在右侧代码区查看差异并选择保留或放弃' });
     } catch (error) {
       const errorText = error instanceof Error ? error.message : '处理代码失败';
       dispatch({ type: 'SET_ERROR', payload: errorText });
       dispatch({ type: 'ADD_AI_PROGRESS', payload: `处理失败：${errorText}` });
       dispatch({ type: 'SET_LOADING', payload: false });
     }
-  }, [compileModel, dispatch]);
+  }, [dispatch]);
 
   return {
     handleGenerate,
@@ -586,5 +674,7 @@ export function useScadWorkflow({ state, dispatch }: UseScadWorkflowOptions) {
     handleExportSTL,
     handleViewCSGTree,
     handleDirectCode,
+    acceptPendingCode,
+    rejectPendingCode,
   };
 }

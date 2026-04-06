@@ -12,6 +12,27 @@ function getWebSocketUrl(): string {
 
 export type CompileStatus = 'queued' | 'running' | 'success' | 'error';
 
+interface HistoryItem {
+  id: string;
+  prompt: string;
+  openscadCode: string;
+  parameters: Record<string, any>;
+  timestamp: Date;
+}
+
+/** AI 返回新代码后，在工作区审阅差异；未接受前不覆盖编辑器内容 */
+export interface PendingCodeReview {
+  previousCode: string;
+  proposedCode: string;
+  compilableCode: string;
+  proposedParameters: Record<string, any>;
+  source: 'generate' | 'fix' | 'direct';
+  /** 生成/修订流程内已预取的各差异块说明（按 segId），避免与右侧重复请求 */
+  blockExplainsBySegId?: Record<number, string>;
+  /** 块说明是否来自 AI 接口（false 表示本地启发式） */
+  blockExplainsFromApi?: boolean;
+}
+
 // 状态接口定义
 export interface AppState {
   sessionId: string;
@@ -28,14 +49,7 @@ export interface AppState {
   compileErrorDetail?: string;
   error?: string;
   history: HistoryItem[];
-}
-
-interface HistoryItem {
-  id: string;
-  prompt: string;
-  openscadCode: string;
-  parameters: Record<string, any>;
-  timestamp: Date;
+  pendingCodeReview: PendingCodeReview | null;
 }
 
 // 动作类型定义：集中描述可触发的状态变更。
@@ -56,7 +70,9 @@ export type AppAction =
   | { type: 'CLEAR_COMPILE_ERROR' }
   | { type: 'ADD_TO_HISTORY'; payload: HistoryItem }
   | { type: 'CLEAR_HISTORY' }
-  | { type: 'RESET_STATE' };
+  | { type: 'RESET_STATE' }
+  | { type: 'SET_PENDING_CODE_REVIEW'; payload: PendingCodeReview | null }
+  | { type: 'CLEAR_PENDING_CODE_REVIEW' };
 
 // 初始状态
 const initialState: AppState = {
@@ -73,7 +89,8 @@ const initialState: AppState = {
   aiProgressTrail: [],
   compileErrorDetail: undefined,
   error: undefined,
-  history: []
+  history: [],
+  pendingCodeReview: null,
 };
 
 // Reducer：统一处理状态转移逻辑。
@@ -140,6 +157,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
     
     case 'RESET_STATE':
       return { ...initialState, sessionId: state.sessionId };
+
+    case 'SET_PENDING_CODE_REVIEW':
+      return { ...state, pendingCodeReview: action.payload };
+
+    case 'CLEAR_PENDING_CODE_REVIEW':
+      return { ...state, pendingCodeReview: null };
     
     default:
       return state;

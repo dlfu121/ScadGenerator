@@ -1,12 +1,29 @@
 import { Router, Request, Response } from 'express';
-import { generateOpenSCAD, fixOpenSCADCode, askProductManager, detectMention, handleMentionedRoute } from '../services/ai-service';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  generateOpenSCAD,
+  fixOpenSCADCode,
+  askProductManager,
+  detectMention,
+  handleMentionedRoute,
+  generateProductBrief,
+  explainOpenScadDiffBlocks,
+  type GenerateOpenSCADOptions,
+  type DiffExplainBlockInput,
+} from '../services/ai-service';
 import { openscadCompiler } from '../services/openscad-compiler';
 import { emitSessionEvent } from '../services/websocket';
+
+const PM_ENABLED = (process.env.PM_ENABLED || 'true').trim().toLowerCase() !== 'false';
 
 // 前端发起参数化建模请求的最小入参。
 interface ParametricChatRequest {
   prompt: string;
   sessionId?: string;
+  /** 已展示过的方案摘要：传入则跳过服务端内部的简报步骤（可与空字符串联用以禁止二次简报） */
+  productBrief?: string | null;
+  /** 非空时表示在现有代码上按 prompt 做修订 */
+  baseOpenscadCode?: string | null;
 }
 
 // 统一返回结构，便于前端状态管理。
@@ -44,8 +61,8 @@ function readCodePayload(input: unknown): string {
 // 主流程：校验 prompt -> 调用 AI 生成 -> 返回代码与参数。
 router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Response<ParametricChatResponse>) => {
   try {
-    const { prompt, sessionId } = req.body;
-    
+    const { prompt, sessionId, productBrief: briefFromBody, baseOpenscadCode } = req.body;
+
     // 空 prompt 直接返回 400，避免触发无意义模型调用。
     if (!prompt) {
       return res.status(400).json({
@@ -55,6 +72,20 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
         sessionId: sessionId || ''
       } as ParametricChatResponse);
     }
+
+    const baseCode =
+      typeof baseOpenscadCode === 'string' && baseOpenscadCode.trim() ? baseOpenscadCode.trim() : '';
+    const precomputed =
+      briefFromBody === undefined || briefFromBody === null ? undefined : String(briefFromBody);
+
+    const genOptions: GenerateOpenSCADOptions | undefined = baseCode
+      ? {
+          baseOpenscadCode: baseCode,
+          ...(precomputed !== undefined ? { precomputedProductBrief: precomputed } : {}),
+        }
+      : precomputed !== undefined
+        ? { precomputedProductBrief: precomputed }
+        : undefined;
 
     const result = await generateOpenSCAD(prompt, sessionId, (event) => {
       if (!sessionId) {
@@ -66,7 +97,7 @@ router.post('/', async (req: Request<{}, {}, ParametricChatRequest>, res: Respon
         ...event,
         timestamp: Date.now(),
       });
-    });
+    }, genOptions);
     
     res.json(result);
   } catch (error) {
@@ -236,6 +267,71 @@ router.post('/fix', async (req: Request<{}, {}, FixRequestBody>, res: Response<P
       sessionId: fallback?.sessionId || req.body.sessionId || '',
       error: error instanceof Error ? error.message : '修复失败'
     } as ParametricChatResponse);
+  }
+});
+
+// 仅生成「建模方案摘要」（参数、特点、约束），供前端在代码生成前展示。
+// 为审阅区每个差异块生成一句 AI 中文功能说明（应用合并前由前端调用）
+router.post('/explain-diff-blocks', async (req: Request<{}, {}, { blocks?: DiffExplainBlockInput[] }>, res: Response) => {
+  try {
+    const raw = req.body?.blocks;
+    const blocks = Array.isArray(raw) ? raw : [];
+    if (blocks.length === 0) {
+      return res.json({ explanations: [] });
+    }
+
+    for (const b of blocks) {
+      if (
+        !b ||
+        typeof (b as DiffExplainBlockInput).index !== 'number' ||
+        !['replace', 'delete', 'insert'].includes((b as DiffExplainBlockInput).kind)
+      ) {
+        return res.status(400).json({ error: 'blocks 项格式无效' });
+      }
+    }
+
+    const explanations = await explainOpenScadDiffBlocks(blocks as DiffExplainBlockInput[]);
+    return res.json({ explanations });
+  } catch (error) {
+    console.error('explain-diff-blocks 错误:', error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : '说明生成失败',
+    });
+  }
+});
+
+router.post('/design-spec', async (req: Request<{}, {}, { prompt?: string; sessionId?: string }>, res: Response) => {
+  try {
+    const raw = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+    if (!raw) {
+      return res.status(400).json({
+        error: '缺少 prompt',
+        productBrief: '',
+        sessionId: typeof req.body?.sessionId === 'string' ? req.body.sessionId : '',
+      });
+    }
+
+    const sessionId =
+      typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+        ? req.body.sessionId.trim()
+        : uuidv4();
+
+    if (!PM_ENABLED) {
+      return res.json({ productBrief: '', sessionId, skipped: true });
+    }
+
+    const productBrief = await generateProductBrief(raw);
+    res.json({ productBrief, sessionId });
+  } catch (error) {
+    console.error('design-spec 错误:', error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : '方案解析失败',
+      productBrief: '',
+      sessionId:
+        typeof req.body?.sessionId === 'string' && req.body.sessionId.trim()
+          ? req.body.sessionId.trim()
+          : uuidv4(),
+    });
   }
 });
 
