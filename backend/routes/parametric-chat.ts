@@ -354,6 +354,7 @@ interface RequirementConfirmationRequest {
   userInput: string;
   conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   sessionId?: string;
+  currentOpenscadCode?: string;
 }
 
 interface RequirementConfirmationResponse {
