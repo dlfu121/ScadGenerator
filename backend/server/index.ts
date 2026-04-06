@@ -19,11 +19,16 @@ app.use('/api/parametric-chat', parametricChatRouter);
 
 // 生产模式下托管前端构建产物（app/dist）。
 const clientDistPath = path.resolve(process.cwd(), 'app', 'dist');
+console.log(`[DEBUG] process.cwd() = ${process.cwd()}`);
+console.log(`[DEBUG] clientDistPath = ${clientDistPath}`);
+console.log(`[DEBUG] clientDistPath exists = ${existsSync(clientDistPath)}`);
 if (existsSync(clientDistPath)) {
   app.use(express.static(clientDistPath));
   app.get(/^(?!\/api).*/, (_, res) => {
     res.sendFile(path.join(clientDistPath, 'index.html'));
   });
+} else {
+  console.log(`[WARN] clientDistPath does not exist!`);
 }
 
 // 启动 HTTP 服务。
